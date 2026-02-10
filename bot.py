@@ -82,6 +82,37 @@ def save_chats(data):
 
 CHATS_DB = load_chats()
 
+def clean_track_info(artist, title, raw_text):
+    """
+    Убирает дублирование, например:
+    'Artist - Song - Song' -> 'Artist - Song'
+    """
+    # 1. Если есть и артист, и название - используем их приоритетно
+    if artist and title:
+        # Проверка: если title сам по себе выглядит как "Song - Song"
+        if f"{title} - {title}" == title:
+            title = title.split(" - ")[0]
+        
+        # Проверка: если title дублируется внутри всей строки (простой кейс)
+        if title == artist:
+            return title
+            
+        final_str = f"{artist} - {title}"
+    else:
+        # Если полей нет, берем raw_text (обычно это поле 'text' из API)
+        final_str = raw_text
+
+    # 2. Финальная зачистка дублей через разбивку строки
+    # Пример: "Traffic - Topic - Me ei lõpeta - Me ei lõpeta"
+    if " - " in final_str:
+        parts = final_str.split(" - ")
+        # Если частей 3 или больше, и две последние совпадают
+        if len(parts) >= 2 and parts[-1] == parts[-2]:
+            parts.pop() # Удаляем последний дубль
+            final_str = " - ".join(parts)
+
+    return final_str
+
 # --- ФУНКЦИИ API AZURACAST ---
 
 def get_station_data():
@@ -159,36 +190,39 @@ def create_progress_bar(elapsed, total, length=10):
     return time_str
 
 def format_main_message(data):
-    """Сообщение 1: Сейчас играет (с прогресс-баром)"""
+    """Сообщение 1: Сейчас играет"""
     np = data['now_playing']
     song = np['song']
     listeners = data['listeners']['total']
     song_id = song.get('id', song.get('text'))
     
-    # Данные о времени
     elapsed = np.get('elapsed', 0)
     duration = np.get('duration', 0)
     
-    # ЭКРАНИРОВАНИЕ
+    playlist_raw = np.get('playlist', 'General')
+    playlist = escape_md(playlist_raw)
+
+    is_request = np.get('is_request') or str(playlist_raw).lower() == 'requested'
+    req_mark = "🎷 **Заказ!** " if is_request else ""
+    
+    # --- ОЧИСТКА НАЗВАНИЯ ---
     raw_title = song.get('text', 'Unknown')
     raw_artist = song.get('artist', '')
     raw_track = song.get('title', '')
     
-    title = escape_md(raw_title)
-    artist = escape_md(raw_artist)
-    track = escape_md(raw_track)
+    # Получаем чистое название без дублей
+    clean_full_title = clean_track_info(raw_artist, raw_track, raw_title)
     
-    full_title = f"{artist} - {track}" if (artist and track) else title
-    playlist = escape_md(np.get('playlist', 'General'))
+    # Экранируем для Markdown
+    full_title_md = escape_md(clean_full_title)
+    
     art_url = song.get('art', '')
-
-    # Генерация полосы проигрывания
     progress_bar = create_progress_bar(elapsed, duration)
 
     text = (
         f"📻 **SBA Radio Live**\n\n"
-        f"🎶 **Сейчас играет:**\n{full_title}\n"
-        f"{progress_bar}\n\n"  # <-- Вставляем полосу сюда
+        f"🎶 **Сейчас играет:**\n{req_mark}{full_title_md}\n"
+        f"{progress_bar}\n\n"
         f"📂 **Плейлист:** {playlist}\n"
         f"👥 **Слушают:** {listeners}\n"
         f"🕒 **Обновлено:** {datetime.now(pytz.timezone(TZ_NAME)).strftime('%H:%M:%S')}"
@@ -196,7 +230,7 @@ def format_main_message(data):
     return text, art_url, listeners, song_id
 
 def format_queue_list(queue_data):
-    """Формирует сообщение 'Далее в эфире' из списка очереди."""
+    """Формирует сообщение 'Далее в эфире'."""
     if not queue_data or not isinstance(queue_data, list):
         return "📂 **Очередь воспроизведения пуста.**"
 
@@ -207,48 +241,50 @@ def format_queue_list(queue_data):
     for item in queue_data:
         if count >= 5: break
         
-        # item - это словарь конкретной песни в очереди
         song = item.get('song', {})
         if isinstance(song, str):
-             # Редкий случай, если API вернул строку вместо объекта song
             raw_text = song.strip()
+            raw_artist = ""
+            raw_title = ""
         else:
             raw_text = song.get('text', '').strip()
+            raw_artist = song.get('artist', '').strip()
+            raw_title = song.get('title', '').strip()
 
         # Фильтрация
         if any(ignored in raw_text.lower() for ignored in IGNORED_KEYWORDS):
             continue
 
-        text = escape_md(raw_text)
-        playlist = escape_md(item.get('playlist', ''))
+        # --- ОЧИСТКА НАЗВАНИЯ ---
+        clean_text = clean_track_info(raw_artist, raw_title, raw_text)
+        text_md = escape_md(clean_text)
+        
+        # Остальные данные
+        playlist_raw = item.get('playlist', '')
+        playlist_md = escape_md(playlist_raw)
         
         played_at = item.get('played_at', 0)
         duration = item.get('duration', 0)
-        is_request = item.get('is_request', False)
+        is_request = item.get('is_request', False) or str(playlist_raw).lower() == 'requested'
 
-        # Расчет времени до начала
         starts_in_min = 0
         if played_at > 0:
             starts_in_sec = played_at - current_ts
             if starts_in_sec > 0:
                 starts_in_min = int(starts_in_sec // 60)
         
-        # Сборка строки с информацией
         infos = []
         if played_at > 0:
             infos.append(f"⏳ {starts_in_min} мин")
         if duration > 0:
             infos.append(f"⏱ {format_duration(duration)}")
-        if playlist:
-            infos.append(f"📂 {playlist}")
+        if playlist_md:
+            infos.append(f"📂 {playlist_md}")
         
         info_str = " | ".join(infos)
-        req_icon = "🎷 **Заказ!** " if is_request else ""
+        req_icon = "🎷 " if is_request else ""
         
-        # Формат: 
-        # 1. Artist - Title
-        #    ⏳ 5 мин | ⏱ 03:20 | 📂 radio 2025
-        lines.append(f"{count + 1}. {req_icon}**{text}**\n   {info_str}")
+        lines.append(f"{count + 1}. {req_icon}**{text_md}**\n   {info_str}")
         count += 1
     
     if not lines:
@@ -472,11 +508,14 @@ async def daily_report_job(context: ContextTypes.DEFAULT_TYPE):
 if __name__ == "__main__":
     if not TOKEN: exit(1)
     
+    # --- НАСТРОЙКА 1: Уменьшаем тайм-аут ---
+    # Ставим 20 секунд. Это меньше, чем интервал обновления (30 сек).
+    # Теперь, если сеть зависнет, ошибка вылетит ДО того, как начнется следующий цикл.
     request = HTTPXRequest(
-        connection_pool_size=8,
-        read_timeout=30.0,
-        write_timeout=30.0,
-        connect_timeout=30.0
+        connection_pool_size=10, # Чуть увеличили пул соединений
+        read_timeout=20.0,       # Было 30.0 -> Ставим 20.0
+        write_timeout=20.0,
+        connect_timeout=20.0
     )
     
     application = ApplicationBuilder().token(TOKEN).request(request).build()
@@ -487,15 +526,21 @@ if __name__ == "__main__":
 
     jq = application.job_queue
     
-    # Обновление дисплея каждые 30 сек
-    jq.run_repeating(update_display_job, interval=30, first=10, job_kwargs={'misfire_grace_time': 10})
+    # --- НАСТРОЙКА 2: Разрешаем наложение задач ---
+    # max_instances=3 означает: "Если предыдущая задача зависла, всё равно запускай новую
+    # (до 3-х штук одновременно)". Это уберет ошибку "skipped: maximum number..."
+    jq.run_repeating(
+        update_display_job, 
+        interval=30, 
+        first=10, 
+        job_kwargs={
+            'misfire_grace_time': 20,
+            'max_instances': 3  # <--- ГЛАВНОЕ ИСПРАВЛЕНИЕ
+        }
+    )
     
-    # --- ОТЧЕТ В 00:00 ---
-    # Устанавливаем полночь по Таллинну.
-    # misfire_grace_time=60 дает боту 1 минуту форы, если в 00:00:00 он был занят отправкой картинки.
     midnight = time(hour=0, minute=0, second=0, tzinfo=pytz.timezone(TZ_NAME))
-    
     jq.run_daily(daily_report_job, time=midnight, job_kwargs={'misfire_grace_time': 60})
 
-    print("Bot started")
+    print("Bot started (Optimized for timeouts)...")
     application.run_polling()
