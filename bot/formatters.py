@@ -166,6 +166,78 @@ def format_queue_list(queue_data: list) -> str:
     return header + "\n".join(lines)
 
 
+def _fmt_total_duration(total_seconds: float) -> str:
+    h = int(total_seconds // 3600)
+    m = int((total_seconds % 3600) // 60)
+    s_rem = int(total_seconds % 60)
+    if h > 0:
+        return f"{h}ч {m}мин {s_rem}сек"
+    return f"{m}мин {s_rem}сек"
+
+
+def format_playlist_announcement(playlist_info: dict, songs: list) -> list[str]:
+    """
+    Форматирует анонс нового плейлиста, сгруппированный по артистам.
+    Возвращает список сообщений (разбивает, если превышен лимит Telegram 4096 символов).
+    """
+    name = escape_md(playlist_info.get('name', 'Без названия'))
+    num_songs = len(songs)
+    total_seconds = sum(s.get('length', 0) for s in songs)
+
+    header = (
+        f"🎵 *Новый плейлист добавлен!*\n"
+        f"━━━━━━━━━━━━━━━━━━\n"
+        f"📂 *Название:* {name}\n"
+        f"🎶 *Треков:* {num_songs}\n"
+        f"⏱ *Общее время:* {_fmt_total_duration(total_seconds)}\n"
+        f"━━━━━━━━━━━━━━━━━━\n"
+    )
+
+    # Group songs by artist
+    from collections import defaultdict
+    by_artist: dict[str, list] = defaultdict(list)
+    for song in songs:
+        artist = song.get('artist', '').strip() or 'Неизвестный артист'
+        by_artist[artist].append(song)
+
+    # Sort artists alphabetically; unknown last
+    def artist_sort_key(a: str) -> tuple:
+        return (a == 'Неизвестный артист', a.lower())
+
+    sorted_artists = sorted(by_artist.keys(), key=artist_sort_key)
+
+    # Build lines per artist block
+    artist_blocks = []
+    for artist in sorted_artists:
+        artist_songs = by_artist[artist]
+        artist_secs = sum(s.get('length', 0) for s in artist_songs)
+        count = len(artist_songs)
+        word = 'трек' if count == 1 else ('трека' if 2 <= count <= 4 else 'треков')
+
+        block = f"\n🎤 *{escape_md(artist)}* ({count} {word} | {_fmt_total_duration(artist_secs)})\n"
+        for song in artist_songs:
+            raw_title = song.get('title', '').strip()
+            raw_text = song.get('text', '').strip()
+            title = escape_md(raw_title or raw_text or '—')
+            dur_str = format_duration(song.get('length', 0))
+            block += f"  • {title} `{dur_str}`\n"
+        artist_blocks.append(block)
+
+    # Split into messages if needed (Telegram limit ~4096 chars)
+    messages = []
+    current = header
+    for block in artist_blocks:
+        if len(current) + len(block) > 4000:
+            messages.append(current)
+            current = block
+        else:
+            current += block
+    if current.strip():
+        messages.append(current)
+
+    return messages if messages else [header]
+
+
 def format_intervals_text(intervals: list) -> str:
     if not intervals:
         return "\n😴 Активности не было."

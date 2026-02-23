@@ -9,7 +9,7 @@ import pytz
 from telegram.ext import ApplicationBuilder, CallbackQueryHandler, CommandHandler
 from telegram.request import HTTPXRequest
 
-from bot.handlers import button_callback, start, test_report_command
+from bot.handlers import announcement_command, button_callback, start, test_report_command
 from bot.jobs import daily_report_job, update_display_job
 from core.config import TELEGRAM_TOKEN, TZ_NAME
 
@@ -34,6 +34,7 @@ if __name__ == "__main__":
 
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("testreport", test_report_command))
+    application.add_handler(CommandHandler("announcement", announcement_command))
     application.add_handler(CallbackQueryHandler(button_callback))
 
     jq = application.job_queue

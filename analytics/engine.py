@@ -1,7 +1,7 @@
 import json
 import os
 import time
-from datetime import datetime
+from datetime import datetime, timedelta
 
 DATA_DIR = "bot_data"
 STATS_FILE = os.path.join(DATA_DIR, "stats_daily.json")
@@ -123,20 +123,28 @@ def rotate_daily_logs():
     if not stats:
         return None
 
-    history = get_history()
-    history["last_day"] = {
-        "date": datetime.now().strftime("%Y-%m-%d"),
+    # Статистика собрана за вчерашний день (задача запускается в полночь)
+    yesterday = datetime.now() - timedelta(days=1)
+    report_date = yesterday.strftime("%Y-%m-%d")
+
+    # Важно: считаем тренд ДО того, как перезапишем историю
+    old_history = get_history()
+    stats['change_percent'] = _calculate_trend(stats['avg'], history_data=old_history)
+    stats['date'] = report_date
+
+    # Теперь сохраняем вчерашние данные в историю
+    old_history["last_day"] = {
+        "date": report_date,
         "avg": stats['avg'],
         "max": stats['max'],
     }
     with open(HISTORY_FILE, 'w') as f:
-        json.dump(history, f)
+        json.dump(old_history, f)
 
+    # Очищаем дневной файл для нового дня
     with open(STATS_FILE, 'w') as f:
         json.dump([], f)
 
-    stats['change_percent'] = _calculate_trend(stats['avg'], history_data=history)
-    stats['date'] = history["last_day"]["date"]
     return stats
 
 

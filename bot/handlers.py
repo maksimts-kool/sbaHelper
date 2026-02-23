@@ -8,10 +8,11 @@ from telegram.error import TimedOut
 from telegram.ext import ContextTypes
 
 from analytics import engine as analytics_engine
-from bot.api import get_queue_data, get_station_data, skip_song_api
+from bot.api import get_playlist_info, get_playlist_songs, get_queue_data, get_station_data, skip_song_api
 from bot.formatters import (
     format_intervals_text,
     format_main_message,
+    format_playlist_announcement,
     format_queue_list,
     get_keyboard,
 )
@@ -112,6 +113,74 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         pass
 
 
+async def announcement_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """
+    Команда /announcement playlist <id> — отправляет анонс плейлиста в чат.
+    Сообщение отправителя удаляется.
+    """
+    args = context.args
+
+    # Delete the sender's command message immediately
+    try:
+        await context.bot.delete_message(
+            chat_id=update.effective_chat.id,
+            message_id=update.message.message_id,
+        )
+    except Exception:
+        pass
+
+    if not args or len(args) < 2 or args[0].lower() != 'playlist':
+        await context.bot.send_message(
+            chat_id=update.effective_chat.id,
+            text="❌ Использование: /announcement playlist <id>\nПример: /announcement playlist 12",
+        )
+        return
+
+    try:
+        playlist_id = int(args[1])
+    except ValueError:
+        await context.bot.send_message(
+            chat_id=update.effective_chat.id,
+            text="❌ ID плейлиста должен быть числом. Пример: /announcement playlist 12",
+        )
+        return
+
+    loading_msg = await context.bot.send_message(
+        chat_id=update.effective_chat.id,
+        text="⏳ Загружаю информацию о плейлисте...",
+    )
+
+    playlist_info = get_playlist_info(playlist_id)
+    if not playlist_info:
+        await loading_msg.edit_text(f"❌ Плейлист с ID {playlist_id} не найден или API недоступен.")
+        return
+
+    songs = get_playlist_songs(playlist_id)
+    messages = format_playlist_announcement(playlist_info, songs)
+
+    # Replace loading message with first part, send the rest
+    try:
+        await loading_msg.edit_text(messages[0], parse_mode='Markdown')
+    except Exception as e:
+        logging.error(f"Error editing loading message: {e}")
+        await loading_msg.delete()
+        await context.bot.send_message(
+            chat_id=update.effective_chat.id,
+            text=messages[0],
+            parse_mode='Markdown',
+        )
+
+    for extra_msg in messages[1:]:
+        try:
+            await context.bot.send_message(
+                chat_id=update.effective_chat.id,
+                text=extra_msg,
+                parse_mode='Markdown',
+            )
+        except Exception as e:
+            logging.error(f"Error sending announcement part: {e}")
+
+
 async def test_report_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Команда /testreport — принудительно генерирует дневной отчет (без очистки)."""
     await update.message.reply_text("⏳ Генерирую отчет...")
@@ -126,10 +195,10 @@ async def test_report_command(update: Update, context: ContextTypes.DEFAULT_TYPE
     emoji = "📈" if trend >= 0 else "📉"
 
     msg = (
-        f"🧪 **Тестовый отчет**\n━━━━━━━━━━\n"
-        f"👥 Пик: **{stats['max']}**\n"
-        f"📉 Среднее: **{stats['avg']:.1f}**\n"
-        f"{emoji} Динамика: **{trend:+.1f}%**\n"
+        f"🧪 *Тестовый отчет* (текущий день)\n━━━━━━━━━━\n"
+        f"👥 Пик: *{stats['max']}*\n"
+        f"📊 Среднее: *{stats['avg']:.1f}*\n"
+        f"{emoji} Динамика: *{trend:+.1f}%*\n"
         f"━━━━━━━━━━{intervals}"
     )
     await update.message.reply_text(msg, parse_mode='Markdown')

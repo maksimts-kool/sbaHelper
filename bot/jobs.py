@@ -114,16 +114,16 @@ async def daily_report_job(context: ContextTypes.DEFAULT_TYPE) -> None:
     stats = analytics_engine.rotate_daily_logs()
 
     if not stats:
-        msg = "🏁 **Итоги дня**\n━━━━━━━━━━\n🤷‍♂️ Данных о слушателях не было."
+        msg = "🏁 *Итоги дня*\n━━━━━━━━━━\n🤷‍♂️ Данных о слушателях не было."
     else:
         intervals = format_intervals_text(stats['intervals'])
         trend = stats['change_percent']
         emoji = "📈" if trend >= 0 else "📉"
         msg = (
-            f"🏁 **Итоги дня** ({stats['date']})\n━━━━━━━━━━\n"
-            f"👥 Пик: **{stats['max']}**\n"
-            f"📉 Среднее: **{stats['avg']:.1f}**\n"
-            f"{emoji} Динамика: **{trend:+.1f}%**\n"
+            f"🏁 *Итоги дня* ({stats['date']})\n━━━━━━━━━━\n"
+            f"👥 Пик: *{stats['max']}*\n"
+            f"📊 Среднее: *{stats['avg']:.1f}*\n"
+            f"{emoji} Динамика: *{trend:+.1f}%*\n"
             f"━━━━━━━━━━{intervals}"
         )
 
