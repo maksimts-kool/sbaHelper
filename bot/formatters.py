@@ -8,7 +8,7 @@ import pytz
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 
 from analytics import engine as analytics_engine
-from bot.state import VOTE_STATE, get_skip_progress, get_song_votes, is_song_in_best
+from bot.state import VOTE_STATE, get_all_votes_data, get_skip_progress, get_song_votes, is_song_in_best
 from core.config import IGNORED_KEYWORDS, REQUEST_URL, STREAM_URL, TZ_NAME, UPVOTE_THRESHOLD
 
 
@@ -111,11 +111,14 @@ def format_main_message(data: dict) -> tuple[str, str, int, str]:
 
     text = (
         f"📻 **SBA Radio Live**\n\n"
+        f"―――――――\n"
         f"🎶 **Сейчас играет:**\n{req_mark}{full_title_md}\n"
         f"{progress_bar}\n\n"
         f"📂 **Плейлист:** {playlist}\n"
         f"👥 **Слушают:** {listeners}\n"
-        f"🕒 **Обновлено:** {datetime.now(tz).strftime('%H:%M:%S')}"
+        f"🕒 **Обновлено:** {datetime.now(tz).strftime('%H:%M:%S')}\n"
+        f"―――――――\n"
+        f"📋 `/view stats` — статистика \u2022 `/view votes` — голоса"
     )
     return text, art_url, listeners, song_id
 
@@ -250,6 +253,55 @@ def format_playlist_announcement(playlist_info: dict, songs: list) -> list[str]:
         messages.append(current)
 
     return messages if messages else [header]
+
+
+# --- СТАТИСТИКА И ГОЛОСА ---
+
+def format_stats_message(stats: dict) -> str:
+    """Форматирует сообщение статистики за текущий день (аналог полуночного отчёта)."""
+    intervals = format_intervals_text(stats['intervals'])
+    trend = stats['change_percent']
+    emoji = "📈" if trend >= 0 else "📉"
+    return (
+        f"📅 *Статистика сегодня*\n━━━━━━━━━━\n"
+        f"👥 Пик: *{stats['max']}*\n"
+        f"📊 Среднее: *{stats['avg']:.1f}*\n"
+        f"{emoji} Динамика: *{trend:+.1f}%*\n"
+        f"━━━━━━━━━━{intervals}"
+    )
+
+
+def format_votes_message(filter_mode: str = 'all', search: str = '') -> str:
+    """Форматирует список голосований за треки с фильтрацией и поиском."""
+    votes_data = get_all_votes_data()
+
+    if filter_mode == 'added':
+        votes_data = [v for v in votes_data if v['in_best']]
+    elif filter_mode == 'notadded':
+        votes_data = [v for v in votes_data if not v['in_best']]
+
+    if search:
+        search_lower = search.lower()
+        votes_data = [v for v in votes_data if search_lower in v['title'].lower()]
+
+    if not votes_data:
+        return "💭 Нет голосов по заданным фильтрам."
+
+    header = "⬆️ *Голоса за треки*"
+    if filter_mode == 'added':
+        header += " (добавленные)"
+    elif filter_mode == 'notadded':
+        header += " (не добавленные)"
+    if search:
+        header += f" \u00b7 `{escape_md(search)}`"
+
+    lines = [header, "━" * 18]
+    for v in votes_data:
+        title = escape_md(v['title'])
+        status = "✅" if v['in_best'] else "⏳"
+        lines.append(f"{status} *{title}*\n   — 👍 {v['count']} голосов")
+
+    return "\n".join(lines)
 
 
 def format_intervals_text(intervals: list) -> str:

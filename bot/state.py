@@ -101,10 +101,12 @@ def get_song_votes(song_id: str) -> int:
     return UPVOTES_DB['songs'].get(song_id, {}).get('count', 0)
 
 
-def increment_song_votes(song_id: str) -> int:
-    """Увеличивает счётчик на 1 и возвращает новое значение."""
+def increment_song_votes(song_id: str, title: str = None) -> int:
+    """Увеличивает счётчик на 1 и возвращает новое значение. Сохраняет название трека если передано."""
     entry = UPVOTES_DB['songs'].setdefault(song_id, {'count': 0, 'in_best': False})
     entry['count'] += 1
+    if title and not entry.get('title'):
+        entry['title'] = title
     save_upvotes(UPVOTES_DB)
     return entry['count']
 
@@ -133,6 +135,20 @@ def decrement_song_votes(song_id: str) -> int:
 def is_song_in_best(song_id: str) -> bool:
     """True если песня уже добавлена в плейлист лучших."""
     return UPVOTES_DB['songs'].get(song_id, {}).get('in_best', False)
+
+
+def get_all_votes_data() -> list:
+    """Возвращает список всех песен с их голосами, отсортированный по убыванию."""
+    result = []
+    for song_id, data in UPVOTES_DB['songs'].items():
+        result.append({
+            'song_id': song_id,
+            'count': data.get('count', 0),
+            'in_best': data.get('in_best', False),
+            'title': data.get('title', f'ID: {song_id[:12]}…'),
+        })
+    result.sort(key=lambda x: x['count'], reverse=True)
+    return result
 
 
 def mark_song_as_best(song_id: str) -> None:

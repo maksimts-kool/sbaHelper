@@ -3,6 +3,8 @@ import tempfile
 import math
 from datetime import datetime
 
+from core.config import IGNORED_KEYWORDS
+
 _intro_was_in_queue = False
 
 # --- НАСТРОЙКА НАЗВАНИЙ ПЛЕЙЛИСТОВ ---
@@ -59,10 +61,18 @@ def run(api, tts, queue, intro_text):
         try:
             playlist_timings = {}
             cumulative_seconds = 0
+            right_now_claimed = False  # «прямо сейчас» может быть только у первого плейлиста
 
             for item in queue[:10]:
                 raw_pl = (item.get("playlist") or "default").strip()
                 duration = item.get("duration", 0)
+
+                # Пропускаем служебные треки по названию (intro, tts time announce и т.д.)
+                song = item.get("song", {})
+                song_text = (song.get("text") or song.get("title") or "").lower()
+                if any(kw in song_text for kw in IGNORED_KEYWORDS):
+                    cumulative_seconds += duration
+                    continue
 
                 if raw_pl in IGNORED_PLAYLISTS:
                     cumulative_seconds += duration
@@ -71,8 +81,16 @@ def run(api, tts, queue, intro_text):
                 pretty_name = get_readable_playlist_name(raw_pl)
                 start_minute = math.floor(cumulative_seconds / 60)
 
+                # Если этот плейлист встречается впервые и расчёт даёт 0 минут —
+                # разрешаем «прямо сейчас» только однажды.
                 if pretty_name not in playlist_timings:
+                    if start_minute == 0:
+                        if not right_now_claimed:
+                            right_now_claimed = True
+                        else:
+                            start_minute = 1  # сдвигаем: «через 1 мин» вместо второго «прямо сейчас»
                     playlist_timings[pretty_name] = []
+
                 if start_minute not in playlist_timings[pretty_name]:
                     playlist_timings[pretty_name].append(start_minute)
 

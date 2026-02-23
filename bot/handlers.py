@@ -19,10 +19,12 @@ from bot.api import (
     skip_song_api,
 )
 from bot.formatters import (
-    format_intervals_text,
+    clean_track_info,
     format_main_message,
     format_playlist_announcement,
     format_queue_list,
+    format_stats_message,
+    format_votes_message,
     get_keyboard,
 )
 from bot.state import (
@@ -40,11 +42,21 @@ from bot.state import (
     save_chats,
     update_vote_logic,
 )
-from core.config import BEST_PLAYLIST_ID, UPVOTE_THRESHOLD
+from core.config import ADMIN_IDS, BEST_PLAYLIST_ID, UPVOTE_THRESHOLD
 
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Команда /start — отправляет плеер и очередь в чат."""
+    """Команда /start — отправляет плеер и очередь в чат (только для админов)."""
+    if ADMIN_IDS and update.effective_user.id not in ADMIN_IDS:
+        try:
+            await context.bot.delete_message(
+                chat_id=update.effective_chat.id,
+                message_id=update.message.message_id,
+            )
+        except Exception:
+            pass
+        return
+
     chat_id = str(update.effective_chat.id)
 
     # Удаляем старые сообщения
@@ -179,7 +191,12 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 
         # Начисляем голос
         record_user_vote(user_id, song_id)
-        new_count = increment_song_votes(song_id)
+        track_title = clean_track_info(
+            song_data.get('artist', ''),
+            song_data.get('title', ''),
+            song_data.get('text', ''),
+        )
+        new_count = increment_song_votes(song_id, title=track_title)
 
         if new_count >= UPVOTE_THRESHOLD:
             # Отвечаем сразу, до тяжёлых API-запросов
@@ -218,8 +235,6 @@ async def announcement_command(update: Update, context: ContextTypes.DEFAULT_TYP
     Команда /announcement playlist <id> — отправляет анонс плейлиста в чат.
     Сообщение отправителя удаляется.
     """
-    args = context.args
-
     # Delete the sender's command message immediately
     try:
         await context.bot.delete_message(
@@ -228,6 +243,11 @@ async def announcement_command(update: Update, context: ContextTypes.DEFAULT_TYP
         )
     except Exception:
         pass
+
+    if ADMIN_IDS and update.effective_user.id not in ADMIN_IDS:
+        return
+
+    args = context.args
 
     if not args or len(args) < 2 or args[0].lower() != 'playlist':
         await context.bot.send_message(
@@ -281,24 +301,60 @@ async def announcement_command(update: Update, context: ContextTypes.DEFAULT_TYP
             logging.error(f"Error sending announcement part: {e}")
 
 
-async def test_report_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Команда /testreport — принудительно генерирует дневной отчет (без очистки)."""
-    await update.message.reply_text("⏳ Генерирую отчет...")
-    stats = analytics_engine.get_today_report_data()
+async def view_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """
+    Команда /view [stats|votes] — просмотр статистики и голосований.
+    /view stats               — статистика сегодняшнего дня
+    /view votes               — все голоса (сортировка по убыванию)
+    /view votes added         — только добавленные в плейлист лучших
+    /view votes notadded      — только ещё не добавленные
+    /view votes <запрос>      — поиск по названию
+    /view votes notadded <q>  — фильтр + поиск
+    """
+    args = context.args
 
-    if not stats:
-        await update.message.reply_text("⚠️ Файл статистики пуст. Запустите радио и подождите 30 сек.")
+    if not args:
+        await update.message.reply_text(
+            "ℹ️ *Использование:*\n"
+            "`/view stats` — статистика дня\n"
+            "`/view votes` — все голоса за треки\n"
+            "`/view votes added` — добавленные\n"
+            "`/view votes notadded` — ещё не добавленные\n"
+            "`/view votes <запрос>` — поиск по названию\n"
+            "`/view votes notadded <запрос>` — фильтр + поиск",
+            parse_mode='Markdown',
+        )
         return
 
-    intervals = format_intervals_text(stats['intervals'])
-    trend = stats['change_percent']
-    emoji = "📈" if trend >= 0 else "📉"
+    subcommand = args[0].lower()
 
-    msg = (
-        f"🧪 *Тестовый отчет* (текущий день)\n━━━━━━━━━━\n"
-        f"👥 Пик: *{stats['max']}*\n"
-        f"📊 Среднее: *{stats['avg']:.1f}*\n"
-        f"{emoji} Динамика: *{trend:+.1f}%*\n"
-        f"━━━━━━━━━━{intervals}"
+    # --- /view stats ---
+    if subcommand == 'stats':
+        stats = analytics_engine.get_today_report_data()
+        if not stats:
+            await update.message.reply_text("⚠️ Данных о статистике пока нет.")
+            return
+        await update.message.reply_text(format_stats_message(stats), parse_mode='Markdown')
+        return
+
+    # --- /view votes ---
+    if subcommand == 'votes':
+        filter_mode = 'all'
+        search = ''
+        rest = args[1:]
+        if rest:
+            if rest[0].lower() in ('added', 'notadded'):
+                filter_mode = rest[0].lower()
+                search = ' '.join(rest[1:])
+            else:
+                search = ' '.join(rest)
+        msg = format_votes_message(filter_mode=filter_mode, search=search)
+        await update.message.reply_text(msg, parse_mode='Markdown')
+        return
+
+    await update.message.reply_text(
+        "❌ Неизвестная подкоманда. Используйте `/view stats` или `/view votes`.",
+        parse_mode='Markdown',
     )
-    await update.message.reply_text(msg, parse_mode='Markdown')
+
+

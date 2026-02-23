@@ -6,10 +6,11 @@ import logging
 from datetime import time
 
 import pytz
+from telegram import BotCommand
 from telegram.ext import ApplicationBuilder, CallbackQueryHandler, CommandHandler
 from telegram.request import HTTPXRequest
 
-from bot.handlers import announcement_command, button_callback, start, test_report_command
+from bot.handlers import announcement_command, button_callback, start, view_command
 from bot.jobs import daily_report_job, update_display_job
 from core.config import TELEGRAM_TOKEN, TZ_NAME
 
@@ -23,6 +24,15 @@ if __name__ == "__main__":
     if not TELEGRAM_TOKEN:
         exit(1)
 
+    BOT_COMMANDS = [
+        BotCommand("start",        "📻 Открыть радио-плеер (только для админов)"),
+        BotCommand("view",         "📊 Просмотр статистики и голосований"),
+        BotCommand("announcement", "📢 Анонс плейлиста (только для админов)"),
+    ]
+
+    async def post_init(app):
+        await app.bot.set_my_commands(BOT_COMMANDS)
+
     request = HTTPXRequest(
         connection_pool_size=10,
         read_timeout=20.0,
@@ -30,11 +40,11 @@ if __name__ == "__main__":
         connect_timeout=20.0,
     )
 
-    application = ApplicationBuilder().token(TELEGRAM_TOKEN).request(request).build()
+    application = ApplicationBuilder().token(TELEGRAM_TOKEN).request(request).post_init(post_init).build()
 
     application.add_handler(CommandHandler("start", start))
-    application.add_handler(CommandHandler("testreport", test_report_command))
     application.add_handler(CommandHandler("announcement", announcement_command))
+    application.add_handler(CommandHandler("view", view_command))
     application.add_handler(CallbackQueryHandler(button_callback))
 
     jq = application.job_queue

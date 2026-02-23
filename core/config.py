@@ -28,3 +28,10 @@ UPVOTE_THRESHOLD = int(os.getenv("UPVOTE_THRESHOLD", "10"))
 # --- Пути к файлам ---
 CHATS_FILE = os.path.join("bot_data", "active_chats.json")
 UPVOTES_FILE = os.path.join("bot_data", "upvotes.json")
+
+# --- Администраторы ---
+# Список user_id через запятую, например: "123456789,987654321"
+_admin_ids_raw = os.getenv("ADMIN_IDS", "")
+ADMIN_IDS: set[int] = {
+    int(uid.strip()) for uid in _admin_ids_raw.split(",") if uid.strip().isdigit()
+}
