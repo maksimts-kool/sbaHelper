@@ -21,5 +21,10 @@ REQUEST_URL = "https://radio.maksimtsikvasvili24.thkit.ee/public/sbaradio/embed-
 # --- Фильтрация очереди ---
 IGNORED_KEYWORDS = ["intro", "tts next5", "tts time announce", "tts_next5", "tts_time"]
 
+# --- Поднятие песен (Best Playlist) ---
+BEST_PLAYLIST_ID = int(os.getenv("BEST_PLAYLIST_ID", "17"))
+UPVOTE_THRESHOLD = int(os.getenv("UPVOTE_THRESHOLD", "10"))
+
 # --- Пути к файлам ---
 CHATS_FILE = os.path.join("bot_data", "active_chats.json")
+UPVOTES_FILE = os.path.join("bot_data", "upvotes.json")

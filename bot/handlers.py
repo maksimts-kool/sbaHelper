@@ -8,7 +8,16 @@ from telegram.error import TimedOut
 from telegram.ext import ContextTypes
 
 from analytics import engine as analytics_engine
-from bot.api import get_playlist_info, get_playlist_songs, get_queue_data, get_station_data, skip_song_api
+from bot.api import (
+    add_media_to_playlist,
+    find_media_file,
+    get_playlist_info,
+    get_playlist_songs,
+    get_queue_data,
+    get_station_data,
+    is_media_in_playlist,
+    skip_song_api,
+)
 from bot.formatters import (
     format_intervals_text,
     format_main_message,
@@ -20,10 +29,18 @@ from bot.state import (
     CHATS_DB,
     LAST_MSG_STATE,
     VOTE_STATE,
+    can_user_vote,
+    decrement_song_votes,
     get_skip_progress,
+    increment_song_votes,
+    is_song_in_best,
+    mark_song_as_best,
+    record_user_vote,
+    remove_user_vote,
     save_chats,
     update_vote_logic,
 )
+from core.config import BEST_PLAYLIST_ID, UPVOTE_THRESHOLD
 
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -51,7 +68,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
     main_text, art, listeners, song_id = format_main_message(data)
     update_vote_logic(song_id)
-    kb = get_keyboard(listeners)
+    kb = get_keyboard(listeners, song_id)
     queue_text = format_queue_list(queue)
 
     try:
@@ -81,36 +98,119 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 
 async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Обрабатывает нажатие кнопки «Пропустить»."""
+    """Обрабатывает нажатия inline-кнопок."""
     query = update.callback_query
-    if query.data != "vote_skip":
-        return
-
     user_id = query.from_user.id
+
     data = get_station_data()
     if not data:
+        await query.answer("⚠️ API недоступно.", show_alert=True)
         return
 
     listeners = data['listeners']['total']
-    votes, required = get_skip_progress(listeners)
+    song_id = data['now_playing']['song'].get('id', data['now_playing']['song'].get('text'))
 
-    if user_id in VOTE_STATE['voters']:
-        await query.answer("Уже голосовали!", show_alert=True)
+    # --- Кнопка «Пропустить» ---
+    if query.data == "vote_skip":
+        votes, required = get_skip_progress(listeners)
+
+        if user_id in VOTE_STATE['voters']:
+            await query.answer("Уже голосовали!", show_alert=True)
+            return
+
+        VOTE_STATE['voters'].add(user_id)
+        votes += 1
+
+        if votes >= required:
+            success, msg = skip_song_api()
+            msg_text = "✅ Пропускаем!" if success else f"Ошибка: {msg}"
+            await query.answer(msg_text, show_alert=True)
+        else:
+            await query.answer(f"Голос принят! ({votes}/{required})")
+
+        try:
+            await query.edit_message_reply_markup(reply_markup=get_keyboard(listeners, song_id))
+        except Exception:
+            pass
         return
 
-    VOTE_STATE['voters'].add(user_id)
-    votes += 1
-    await query.answer(f"Голос принят! ({votes}/{required})")
+    # --- Кнопка «Уже в лучших» (информационная) ---
+    if query.data == "raise_already_best":
+        await query.answer("✅ Эта песня уже в плейлисте лучших!", show_alert=True)
+        return
 
-    if votes >= required:
-        success, msg = skip_song_api()
-        msg_text = "✅ Пропускаем!" if success else f"Ошибка: {msg}"
-        await query.answer(msg_text, show_alert=True)
+    # --- Кнопка «Поднять» (тоггл: повторное нажатие отменяет голос) ---
+    if query.data == "vote_raise":
+        # Проверка: песня уже в лучших (локальный кеш)
+        if is_song_in_best(song_id):
+            await query.answer("✅ Эта песня уже в плейлисте лучших!", show_alert=True)
+            try:
+                await query.edit_message_reply_markup(reply_markup=get_keyboard(listeners, song_id))
+            except Exception:
+                pass
+            return
 
-    try:
-        await query.edit_message_reply_markup(reply_markup=get_keyboard(listeners))
-    except Exception:
-        pass
+        # Уже голосовал сегодня — отменяем голос (toggle)
+        if not can_user_vote(user_id, song_id):
+            remove_user_vote(user_id, song_id)
+            new_count = decrement_song_votes(song_id)
+            await query.answer(
+                f"↩️ Голос снят. Счёт: {new_count}/{UPVOTE_THRESHOLD}",
+                show_alert=False,
+            )
+            try:
+                await query.edit_message_reply_markup(reply_markup=get_keyboard(listeners, song_id))
+            except Exception:
+                pass
+            return
+
+        # Проверяем через API — вдруг песня уже была в плейлисте 16 до нас
+        song_data = data['now_playing']['song']
+        artist = song_data.get('artist', '')
+        title = song_data.get('title', '')
+        if is_media_in_playlist(song_id, BEST_PLAYLIST_ID):
+            mark_song_as_best(song_id)
+            await query.answer("✅ Эта песня уже в плейлисте лучших!", show_alert=True)
+            try:
+                await query.edit_message_reply_markup(reply_markup=get_keyboard(listeners, song_id))
+            except Exception:
+                pass
+            return
+
+        # Начисляем голос
+        record_user_vote(user_id, song_id)
+        new_count = increment_song_votes(song_id)
+
+        if new_count >= UPVOTE_THRESHOLD:
+            # Отвечаем сразу, до тяжёлых API-запросов
+            await query.answer(
+                f"⏳ Набрано {new_count} голосов! Добавляю в лучшие...",
+                show_alert=True,
+            )
+            try:
+                await query.edit_message_reply_markup(reply_markup=get_keyboard(listeners, song_id))
+            except Exception:
+                pass
+            # Добавляем в плейлист 16
+            media = find_media_file(song_id, artist, title)
+            if media:
+                ok, result = add_media_to_playlist(media['id'], BEST_PLAYLIST_ID)
+                if ok:
+                    mark_song_as_best(song_id)
+                else:
+                    logging.error(f"Failed to add {song_id} to playlist: {result}")
+            else:
+                logging.warning(f"Media file not found for song_id={song_id}")
+        else:
+            await query.answer(
+                f"⬆️ Голос принят! Счёт: {new_count}/{UPVOTE_THRESHOLD}",
+                show_alert=False,
+            )
+            try:
+                await query.edit_message_reply_markup(reply_markup=get_keyboard(listeners, song_id))
+            except Exception:
+                pass
+        return
 
 
 async def announcement_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:

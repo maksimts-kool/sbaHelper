@@ -8,8 +8,8 @@ import pytz
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 
 from analytics import engine as analytics_engine
-from bot.state import VOTE_STATE, get_skip_progress
-from core.config import IGNORED_KEYWORDS, REQUEST_URL, STREAM_URL, TZ_NAME
+from bot.state import VOTE_STATE, get_skip_progress, get_song_votes, is_song_in_best
+from core.config import IGNORED_KEYWORDS, REQUEST_URL, STREAM_URL, TZ_NAME, UPVOTE_THRESHOLD
 
 
 # --- УТИЛИТЫ ---
@@ -61,12 +61,26 @@ def create_progress_bar(elapsed, total, length=10) -> str:
 
 # --- КЛАВИАТУРА ---
 
-def get_keyboard(listeners: int) -> InlineKeyboardMarkup:
+def get_keyboard(listeners: int, song_id: str = None) -> InlineKeyboardMarkup:
     votes, required = get_skip_progress(listeners)
     btn_listen = InlineKeyboardButton("🎧 Слушать", url=STREAM_URL)
     btn_skip = InlineKeyboardButton(f"⏭ Пропустить ({votes}/{required})", callback_data="vote_skip")
     btn_request = InlineKeyboardButton("📝 Заказать трек", url=REQUEST_URL)
-    return InlineKeyboardMarkup([[btn_listen], [btn_skip, btn_request]])
+
+    rows = [[btn_listen], [btn_skip, btn_request]]
+
+    if song_id:
+        if is_song_in_best(song_id):
+            btn_raise = InlineKeyboardButton("✅ Уже в лучших", callback_data="raise_already_best")
+        else:
+            count = get_song_votes(song_id)
+            btn_raise = InlineKeyboardButton(
+                f"⬆️ Поднять ({count}/{UPVOTE_THRESHOLD})",
+                callback_data="vote_raise",
+            )
+        rows.append([btn_raise])
+
+    return InlineKeyboardMarkup(rows)
 
 
 # --- ФОРМАТИРОВАНИЕ СООБЩЕНИЙ ---

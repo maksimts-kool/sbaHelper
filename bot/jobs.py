@@ -19,6 +19,7 @@ from bot.state import (
     CHATS_DB,
     LAST_MSG_STATE,
     VOTE_STATE,
+    get_song_votes,
     save_chats,
     update_vote_logic,
 )
@@ -36,8 +37,8 @@ async def update_display_job(context: ContextTypes.DEFAULT_TYPE) -> None:
 
     update_vote_logic(song_id)
     analytics_engine.log_listener_count(listeners)
-    kb = get_keyboard(listeners)
-    current_kb_hash = str(listeners) + str(len(VOTE_STATE['voters']))
+    kb = get_keyboard(listeners, song_id)
+    current_kb_hash = str(listeners) + str(len(VOTE_STATE['voters'])) + str(get_song_votes(song_id))
 
     chats_to_remove = []
 
