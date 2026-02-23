@@ -9,7 +9,6 @@ WORKDIR /app
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Copy all python files (main.py, playlist_service.py, time_service.py)
-COPY *.py ./
-
+# Copy the entire project (entry points + packages)
+COPY . .
 CMD ["python", "main.py"]
