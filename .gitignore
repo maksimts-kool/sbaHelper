@@ -181,3 +181,4 @@ cython_debug/
 .cursorindexingignore
 docker-compose.yml
 /bot_data
+/cookies

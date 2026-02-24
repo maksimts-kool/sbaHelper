@@ -3,3 +3,4 @@ pydub>=0.25.1
 edge-tts>=6.1.8
 python-telegram-bot[job-queue]>=20.0
 pytz
+yt-dlp>=2024.1.1
