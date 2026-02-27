@@ -42,6 +42,10 @@ class FileTooLargeError(DownloadError):
     """Файл превышает допустимый размер для Telegram."""
 
 
+class UnsupportedContentError(DownloadError):
+    """Тип контента не поддерживается (стримы, фото)."""
+
+
 # --------------------------------------------------------------------------- #
 #  Утилиты                                                                     #
 # --------------------------------------------------------------------------- #
@@ -78,7 +82,20 @@ def fetch_info(url: str) -> VideoInfo:
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             meta = ydl.extract_info(url, download=False)
     except yt_dlp.utils.DownloadError as e:
-        raise DownloadError(str(e)) from e
+        err_msg = str(e)
+        if "unsupported url" in err_msg.lower() and ("/photo/" in url.lower() or "/photo/" in err_msg.lower()):
+            raise UnsupportedContentError("Фото-посты не поддерживаются. Только обычные видео.") from e
+        raise DownloadError(err_msg) from e
+
+    # Отклоняем прямые трансляции (включая архивные)
+    _live_status = meta.get("live_status") or ""
+    if meta.get("is_live") or _live_status in ("is_live", "is_upcoming", "was_live", "post_live"):
+        raise UnsupportedContentError("Прямые трансляции не поддерживаются. Только обычные видео.")
+
+    # Отклоняем фото-посты (нет видео-дорожки ни в одном формате)
+    _formats = meta.get("formats") or []
+    if _formats and not any(f.get("vcodec", "none") not in ("none", None) for f in _formats):
+        raise UnsupportedContentError("Фото-посты не поддерживаются. Только обычные видео.")
 
     duration = int(meta.get("duration") or 0)
     if duration > MAX_DURATION_SEC:

@@ -16,6 +16,7 @@ from downloader.core import (
     DownloadError,
     DownloadResult,
     FileTooLargeError,
+    UnsupportedContentError,
     VideoTooLongError,
     cleanup,
     download_video,
@@ -93,6 +94,9 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         info = await loop.run_in_executor(
             None, fetch_info, url
         )
+    except UnsupportedContentError as e:
+        await _safe_edit(status_msg, f"🚫 {e}")
+        return
     except VideoTooLongError as e:
         await _safe_edit(status_msg, f"⏱ {e}")
         return
