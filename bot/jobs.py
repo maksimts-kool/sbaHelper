@@ -10,6 +10,7 @@ from telegram.ext import ContextTypes
 from analytics import engine as analytics_engine
 from bot.api import get_queue_data, get_station_data
 from bot.formatters import (
+    clean_track_info,
     format_intervals_text,
     format_main_message,
     format_queue_list,
@@ -19,6 +20,7 @@ from bot.state import (
     CHATS_DB,
     LAST_MSG_STATE,
     VOTE_STATE,
+    add_recent_song,
     get_song_votes,
     save_chats,
     update_vote_logic,
@@ -35,7 +37,20 @@ async def update_display_job(context: ContextTypes.DEFAULT_TYPE) -> None:
     main_text, art, listeners, song_id = format_main_message(data)
     queue_text = format_queue_list(queue)
 
-    update_vote_logic(song_id)
+    song_data = data['now_playing']['song']
+    display_title = clean_track_info(
+        song_data.get('artist', ''),
+        song_data.get('title', ''),
+        song_data.get('text', ''),
+    )
+    changed = update_vote_logic(song_id)
+    if changed:
+        add_recent_song(
+            song_id,
+            display_title=display_title,
+            artist=song_data.get('artist', ''),
+            title=song_data.get('title', ''),
+        )
     analytics_engine.log_listener_count(listeners)
     kb = get_keyboard(listeners, song_id)
     current_kb_hash = str(listeners) + str(len(VOTE_STATE['voters'])) + str(get_song_votes(song_id))

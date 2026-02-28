@@ -10,8 +10,10 @@ from telegram import BotCommand
 from telegram.ext import ApplicationBuilder, CallbackQueryHandler, CommandHandler
 from telegram.request import HTTPXRequest
 
-from bot.handlers import announcement_command, button_callback, start, view_command
+from bot.api import get_station_history
+from bot.handlers import announcement_command, button_callback, start, votes_command
 from bot.jobs import daily_report_job, update_display_job
+from bot.state import add_recent_song
 from core.config import TELEGRAM_TOKEN, TZ_NAME
 
 logging.basicConfig(
@@ -25,13 +27,23 @@ if __name__ == "__main__":
         exit(1)
 
     BOT_COMMANDS = [
-        BotCommand("start",        "📻 Открыть радио-плеер (только для админов)"),
-        BotCommand("view",         "📊 Просмотр статистики и голосований"),
-        BotCommand("announcement", "📢 Анонс плейлиста (только для админов)"),
+        BotCommand("start",        "📻 Открыть радио-плеер"),
+        BotCommand("votes",        "🗳 Голоса — view / create / edit"),
+        BotCommand("announcement", "📢 Анонс плейлиста"),
     ]
 
     async def post_init(app):
         await app.bot.set_my_commands(BOT_COMMANDS)
+        # Pre-seed recent songs from history so /votes create works on a fresh start
+        import asyncio
+        history = await asyncio.get_event_loop().run_in_executor(None, lambda: get_station_history(5))
+        for entry in reversed(history):  # oldest first so newest ends up at index 0
+            add_recent_song(
+                entry['song_id'],
+                display_title=entry['display_title'],
+                artist=entry['artist'],
+                title=entry['title'],
+            )
 
     request = HTTPXRequest(
         connection_pool_size=10,
@@ -44,7 +56,7 @@ if __name__ == "__main__":
 
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("announcement", announcement_command))
-    application.add_handler(CommandHandler("view", view_command))
+    application.add_handler(CommandHandler("votes", votes_command))
     application.add_handler(CallbackQueryHandler(button_callback))
 
     jq = application.job_queue

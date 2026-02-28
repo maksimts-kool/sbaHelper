@@ -80,7 +80,7 @@ def get_playlist_songs(playlist_id: int) -> list:
 
 def find_media_file(song_unique_id: str, artist: str = '', title: str = '') -> dict | None:
     """
-    Ищет медиафайл на станции по unique_id.
+    Ищет медиафайл на станции по song_id (32-символьный хеш из NowPlaying song.id).
     Если не найдено — пробует match по artist+title.
     Возвращает dict файла или None.
     """
@@ -91,9 +91,9 @@ def find_media_file(song_unique_id: str, artist: str = '', title: str = '') -> d
             return None
         all_files = r.json()
 
-        # 1. Точное совпадение по unique_id
+        # 1. Точное совпадение по song_id (32-char hash, совпадает с song.id в NowPlaying)
         for f in all_files:
-            if f.get('unique_id') == song_unique_id:
+            if f.get('song_id') == song_unique_id:
                 return f
 
         # 2. Резервный поиск по artist + title
@@ -158,7 +158,7 @@ def add_media_to_playlist(media_id: int, playlist_id: int) -> tuple[bool, str]:
 
 
 def is_media_in_playlist(song_unique_id: str, playlist_id: int) -> bool:
-    """Проверяет, находится ли трек (по unique_id) в указанном плейлисте."""
+    """Проверяет, находится ли трек (по song_id хешу из NowPlaying) в указанном плейлисте."""
     media = find_media_file(song_unique_id)
     if not media:
         return False
@@ -169,3 +169,41 @@ def is_media_in_playlist(song_unique_id: str, playlist_id: int) -> bool:
         if isinstance(p, int) and p == playlist_id:
             return True
     return False
+
+
+def get_station_history(limit: int = 5) -> list:
+    """
+    Возвращает последние `limit` сыгранных треков через API истории.
+    Каждый элемент: {'song_id': str, 'display_title': str, 'artist': str, 'title': str}
+    """
+    try:
+        url = f"{AZURACAST_HOST}/api/station/{STATION_ID}/history"
+        r = requests.get(url, headers=API_HEADERS, timeout=10)
+        if r.status_code != 200:
+            return []
+        history = r.json()
+        result = []
+        seen = set()
+        for entry in history:
+            song = entry.get('song', {})
+            song_id = song.get('id', '')
+            if not song_id or song_id in seen:
+                continue
+            seen.add(song_id)
+            artist = song.get('artist', '')
+            title = song.get('title', '')
+            text = song.get('text', '')
+            from bot.formatters import clean_track_info
+            display_title = clean_track_info(artist, title, text)
+            result.append({
+                'song_id': song_id,
+                'display_title': display_title,
+                'artist': artist,
+                'title': title,
+            })
+            if len(result) >= limit:
+                break
+        return result
+    except Exception as e:
+        logging.error(f"API Error (get_station_history): {e}")
+        return []

@@ -138,12 +138,15 @@ def is_song_in_best(song_id: str) -> bool:
 
 
 def get_all_votes_data() -> list:
-    """Возвращает список всех песен с их голосами, отсортированный по убыванию."""
+    """Возвращает список всех песен с их голосами, отсортированный по убыванию. Пропускает песни с 0 голосов."""
     result = []
     for song_id, data in UPVOTES_DB['songs'].items():
+        count = data.get('count', 0)
+        if count <= 0:
+            continue
         result.append({
             'song_id': song_id,
-            'count': data.get('count', 0),
+            'count': count,
             'in_best': data.get('in_best', False),
             'title': data.get('title', f'ID: {song_id[:12]}…'),
         })
@@ -174,3 +177,69 @@ def get_skip_progress(total_listeners: int) -> tuple[int, int]:
     """Возвращает (текущие_голоса, нужно_голосов)."""
     required = 1 if total_listeners <= 1 else int(total_listeners * 0.5)
     return len(VOTE_STATE['voters']), required
+
+
+# --- ИСТОРИЯ ПОСЛЕДНИХ ПЕСЕН ---
+
+RECENT_SONGS: list = []  # [{'song_id': str, 'title': str, 'artist': str, 'display_title': str}]
+_MAX_RECENT = 5
+
+
+def add_recent_song(song_id: str, display_title: str, artist: str = '', title: str = '') -> None:
+    """Добавляет песню в список последних (для /votes create)."""
+    global RECENT_SONGS
+    RECENT_SONGS = [s for s in RECENT_SONGS if s['song_id'] != song_id]
+    RECENT_SONGS.insert(0, {
+        'song_id': song_id,
+        'display_title': display_title,
+        'artist': artist,
+        'title': title,
+    })
+    RECENT_SONGS = RECENT_SONGS[:_MAX_RECENT]
+
+
+def get_recent_songs() -> list:
+    """Возвращает список последних до _MAX_RECENT песен."""
+    return list(RECENT_SONGS)
+
+
+# --- ЛИЧНЫЕ ГОЛОСА ПОЛЬЗОВАТЕЛЯ ---
+
+def get_user_votes_summary(user_id: int) -> list[dict]:
+    """Возвращает список песен, за которые пользователь голосовал, с суммой по всем дням."""
+    uid = str(user_id)
+    user_day_votes = UPVOTES_DB['user_votes'].get(uid, {})
+    song_vote_counts: dict[str, int] = {}
+    for day_songs in user_day_votes.values():
+        for song_id in day_songs:
+            song_vote_counts[song_id] = song_vote_counts.get(song_id, 0) + 1
+
+    result = []
+    for song_id, user_count in song_vote_counts.items():
+        song_data = UPVOTES_DB['songs'].get(song_id, {})
+        result.append({
+            'song_id': song_id,
+            'title': song_data.get('title', f'ID: {song_id[:12]}…'),
+            'user_votes': user_count,
+            'total_votes': song_data.get('count', 0),
+            'in_best': song_data.get('in_best', False),
+        })
+    result.sort(key=lambda x: x['user_votes'], reverse=True)
+    return result
+
+
+def remove_all_user_votes_for_song(user_id: int, song_id: str) -> int:
+    """Удаляет все голоса пользователя за конкретную песню по всем дням. Возвращает кол-во удалённых."""
+    uid = str(user_id)
+    user_day_votes = UPVOTES_DB['user_votes'].get(uid, {})
+    count_removed = 0
+    for date in list(user_day_votes.keys()):
+        if song_id in user_day_votes[date]:
+            user_day_votes[date].remove(song_id)
+            count_removed += 1
+    if count_removed > 0:
+        entry = UPVOTES_DB['songs'].get(song_id)
+        if entry:
+            entry['count'] = max(0, entry['count'] - count_removed)
+        save_upvotes(UPVOTES_DB)
+    return count_removed

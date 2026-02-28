@@ -118,7 +118,7 @@ def format_main_message(data: dict) -> tuple[str, str, int, str]:
         f"👥 **Слушают:** {listeners}\n"
         f"🕒 **Обновлено:** {datetime.now(tz).strftime('%H:%M:%S')}\n"
         f"―――――――\n"
-        f"📋 `/view stats` — статистика \u2022 `/view votes` — голоса"
+        f"📋 `/votes view` — голоса \u2022 `/votes create` — голосовать"
     )
     return text, art_url, listeners, song_id
 
@@ -256,20 +256,6 @@ def format_playlist_announcement(playlist_info: dict, songs: list) -> list[str]:
 
 
 # --- СТАТИСТИКА И ГОЛОСА ---
-
-def format_stats_message(stats: dict) -> str:
-    """Форматирует сообщение статистики за текущий день (аналог полуночного отчёта)."""
-    intervals = format_intervals_text(stats['intervals'])
-    trend = stats['change_percent']
-    emoji = "📈" if trend >= 0 else "📉"
-    return (
-        f"📅 *Статистика сегодня*\n━━━━━━━━━━\n"
-        f"👥 Пик: *{stats['max']}*\n"
-        f"📊 Среднее: *{stats['avg']:.1f}*\n"
-        f"{emoji} Динамика: *{trend:+.1f}%*\n"
-        f"━━━━━━━━━━{intervals}"
-    )
-
 
 def format_votes_message(filter_mode: str = 'all', search: str = '') -> str:
     """Форматирует список голосований за треки с фильтрацией и поиском."""

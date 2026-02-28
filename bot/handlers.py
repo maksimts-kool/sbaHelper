@@ -3,11 +3,10 @@
 """
 import logging
 
-from telegram import Update
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.error import TimedOut
 from telegram.ext import ContextTypes
 
-from analytics import engine as analytics_engine
 from bot.api import (
     add_media_to_playlist,
     find_media_file,
@@ -23,7 +22,6 @@ from bot.formatters import (
     format_main_message,
     format_playlist_announcement,
     format_queue_list,
-    format_stats_message,
     format_votes_message,
     get_keyboard,
 )
@@ -33,11 +31,15 @@ from bot.state import (
     VOTE_STATE,
     can_user_vote,
     decrement_song_votes,
+    get_recent_songs,
     get_skip_progress,
+    get_song_votes,
+    get_user_votes_summary,
     increment_song_votes,
     is_song_in_best,
     mark_song_as_best,
     record_user_vote,
+    remove_all_user_votes_for_song,
     remove_user_vote,
     save_chats,
     update_vote_logic,
@@ -229,6 +231,123 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
                 pass
         return
 
+    # --- Фильтры /votes view ---
+    if query.data.startswith("vview_"):
+        filter_mode = query.data[6:]
+        if filter_mode not in ('all', 'added', 'notadded'):
+            await query.answer()
+            return
+        await query.answer()
+        await _send_votes_view(
+            query, filter_mode, edit=True,
+            context=context, session_msg_id=query.message.message_id,
+        )
+        return
+
+    # --- Кнопка «Снять все голоса» (из меню /votes edit) ---
+    if query.data.startswith("rmvote_"):
+        target_song_id = query.data[7:]
+        removed = remove_all_user_votes_for_song(user_id, target_song_id)
+        if removed:
+            await query.answer(f"🗑 Голоса сняты ({removed} шт.)")
+        else:
+            await query.answer("Голосов не найдено.")
+        # Обновляем меню
+        summary = get_user_votes_summary(user_id)
+        base_text_edit = "🗳 *Ваши голоса:*\nНажмите кнопку чтобы снять _все_ свои голоса за эту песню."
+        if not summary:
+            base_text_edit = "🗳 *Ваши голоса:*\n\n💭 Голосов нет."
+            await _reset_votes_autodelete(
+                context, query.message.chat_id, query.message.message_id,
+                new_base_text=base_text_edit, new_kb=None,
+            )
+            return
+        rows = []
+        for item in summary:
+            cb = f"rmvote_{item['song_id']}"
+            if len(cb.encode()) <= 64:
+                label = f"❌ {item['title'][:35]} (+{item['user_votes']})"
+                rows.append([InlineKeyboardButton(label, callback_data=cb)])
+        new_kb = InlineKeyboardMarkup(rows) if rows else None
+        await _reset_votes_autodelete(
+            context, query.message.chat_id, query.message.message_id,
+            new_base_text=base_text_edit, new_kb=new_kb,
+        )
+        return
+
+    # --- Кнопка «Проголосовать за старую песню» (из меню /votes create) ---
+    if query.data.startswith("vsong_"):
+        target_song_id = query.data[6:]
+
+        if is_song_in_best(target_song_id):
+            await query.answer("✅ Эта песня уже в плейлисте лучших!", show_alert=True)
+            return
+
+        if not can_user_vote(user_id, target_song_id):
+            await query.answer("⏳ Сегодня вы уже голосовали за эту песню.", show_alert=True)
+            return
+
+        if is_media_in_playlist(target_song_id, BEST_PLAYLIST_ID):
+            mark_song_as_best(target_song_id)
+            await query.answer("✅ Эта песня уже в плейлисте лучших!", show_alert=True)
+            return
+
+        # Получаем данные трека из истории недавних
+        recent = {s['song_id']: s for s in get_recent_songs()}
+        song_info = recent.get(target_song_id, {})
+        track_title = song_info.get('display_title', f'ID: {target_song_id[:12]}…')
+        s_artist = song_info.get('artist', '')
+        s_title = song_info.get('title', '')
+
+        record_user_vote(user_id, target_song_id)
+        new_count = increment_song_votes(target_song_id, title=track_title)
+
+        if new_count >= UPVOTE_THRESHOLD:
+            await query.answer(
+                f"⏳ Набрано {new_count} голосов! Добавляю в лучшие...",
+                show_alert=True,
+            )
+            media = find_media_file(target_song_id, s_artist, s_title)
+            if media:
+                ok, result = add_media_to_playlist(media['id'], BEST_PLAYLIST_ID)
+                if ok:
+                    mark_song_as_best(target_song_id)
+                else:
+                    logging.error(f"Failed to add {target_song_id} to playlist: {result}")
+            else:
+                logging.warning(f"Media file not found for song_id={target_song_id}")
+        else:
+            await query.answer(
+                f"⬆️ Голос принят! Счёт: {new_count}/{UPVOTE_THRESHOLD}",
+                show_alert=False,
+            )
+
+        # Обновляем кнопки в сообщении create
+        recent_songs = get_recent_songs()[:3]
+        if recent_songs:
+            rows = []
+            for s in recent_songs:
+                sid = s['song_id']
+                cb = f"vsong_{sid}"
+                if len(cb.encode()) > 64:
+                    continue
+                already_best = is_song_in_best(sid)
+                voted_today = not can_user_vote(user_id, sid)
+                cnt = get_song_votes(sid)
+                if already_best:
+                    icon = "✅"
+                elif voted_today:
+                    icon = "✔️"
+                else:
+                    icon = "⬆️"
+                label = f"{icon} {s['display_title'][:35]} ({cnt}/{UPVOTE_THRESHOLD})"
+                rows.append([InlineKeyboardButton(label, callback_data=cb)])
+            await _reset_votes_autodelete(
+                context, query.message.chat_id, query.message.message_id,
+                new_kb=InlineKeyboardMarkup(rows),
+            )
+        return
+
 
 async def announcement_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """
@@ -301,59 +420,297 @@ async def announcement_command(update: Update, context: ContextTypes.DEFAULT_TYP
             logging.error(f"Error sending announcement part: {e}")
 
 
-async def view_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+# ---------------------------------------------------------------------------
+# /votes message auto-delete – countdown in message footer
+# ---------------------------------------------------------------------------
+_VOTES_SESSIONS: dict[int, dict] = {}  # bot_msg_id -> {chat_id, user_msg_id, base_text, kb, parse_mode}
+_VOTES_AUTODEL_SEC = 60
+_VOTES_TICKS = [45, 30, 15]
+
+
+def _with_timer(text: str, secs: int) -> str:
+    return f"{text}\n\n_🗑 Удалится через {secs} с_"
+
+
+def _cancel_votes_jobs(context: ContextTypes.DEFAULT_TYPE, chat_id, bot_msg_id: int) -> None:
+    for name in (
+        [f"votes_tick_{chat_id}_{bot_msg_id}_{r}" for r in _VOTES_TICKS]
+        + [f"votes_del_{chat_id}_{bot_msg_id}"]
+        + [f"votes_autodel_{chat_id}_{bot_msg_id}"]  # legacy
+    ):
+        for job in context.job_queue.get_jobs_by_name(name):
+            job.schedule_removal()
+
+
+def _schedule_votes_autodelete(
+    context: ContextTypes.DEFAULT_TYPE,
+    chat_id,
+    bot_msg_id: int,
+    user_msg_id: int,
+    base_text: str,
+    kb: InlineKeyboardMarkup | None = None,
+    parse_mode: str = 'Markdown',
+) -> None:
+    _cancel_votes_jobs(context, chat_id, bot_msg_id)
+    _VOTES_SESSIONS[bot_msg_id] = {
+        'chat_id': chat_id,
+        'user_msg_id': user_msg_id,
+        'base_text': base_text,
+        'kb': kb,
+        'parse_mode': parse_mode,
+    }
+    base = {'chat_id': chat_id, 'bot_msg_id': bot_msg_id, 'user_msg_id': user_msg_id}
+    for remaining in _VOTES_TICKS:
+        context.job_queue.run_once(
+            _votes_tick_job,
+            when=_VOTES_AUTODEL_SEC - remaining,
+            name=f"votes_tick_{chat_id}_{bot_msg_id}_{remaining}",
+            data={**base, 'remaining': remaining},
+        )
+    context.job_queue.run_once(
+        _votes_autodelete_job,
+        when=_VOTES_AUTODEL_SEC,
+        name=f"votes_del_{chat_id}_{bot_msg_id}",
+        data=base,
+    )
+
+
+async def _reset_votes_autodelete(
+    context: ContextTypes.DEFAULT_TYPE,
+    chat_id,
+    bot_msg_id: int,
+    new_base_text: str | None = None,
+    new_kb: InlineKeyboardMarkup | None = ...,  # type: ignore[assignment]
+) -> None:
+    """Resets the 60 s timer; optionally updates text/keyboard."""
+    session = _VOTES_SESSIONS.get(bot_msg_id)
+    if not session:
+        return
+    if new_base_text is not None:
+        session['base_text'] = new_base_text
+    if new_kb is not ...:  # type: ignore[comparison-overlap]
+        session['kb'] = new_kb
+    try:
+        await context.bot.edit_message_text(
+            chat_id=chat_id,
+            message_id=bot_msg_id,
+            text=_with_timer(session['base_text'], _VOTES_AUTODEL_SEC),
+            reply_markup=session['kb'],
+            parse_mode=session['parse_mode'],
+        )
+    except Exception:
+        pass
+    _schedule_votes_autodelete(
+        context, chat_id, bot_msg_id,
+        session['user_msg_id'], session['base_text'],
+        session['kb'], session['parse_mode'],
+    )
+
+
+async def _votes_tick_job(context: ContextTypes.DEFAULT_TYPE) -> None:
+    d = context.job.data
+    session = _VOTES_SESSIONS.get(d['bot_msg_id'])
+    if not session:
+        return
+    try:
+        await context.bot.edit_message_text(
+            chat_id=d['chat_id'],
+            message_id=d['bot_msg_id'],
+            text=_with_timer(session['base_text'], d['remaining']),
+            reply_markup=session['kb'],
+            parse_mode=session['parse_mode'],
+        )
+    except Exception:
+        pass
+
+
+async def _votes_autodelete_job(context: ContextTypes.DEFAULT_TYPE) -> None:
+    d = context.job.data
+    _VOTES_SESSIONS.pop(d['bot_msg_id'], None)
+    for msg_id in (d['bot_msg_id'], d['user_msg_id']):
+        try:
+            await context.bot.delete_message(chat_id=d['chat_id'], message_id=msg_id)
+        except Exception:
+            pass
+
+
+async def _send_votes_view(target, filter_mode: str, edit: bool = False, context=None, session_msg_id: int = 0):
+    """Sends or edits the votes view message. Returns (Message|None, base_text, kb)."""
+    base_text = format_votes_message(filter_mode=filter_mode)
+    kb = _votes_view_keyboard(filter_mode)
+    if edit:
+        if context and session_msg_id:
+            await _reset_votes_autodelete(context, target.message.chat_id, session_msg_id,
+                                          new_base_text=base_text, new_kb=kb)
+        else:
+            try:
+                await target.edit_message_text(
+                    _with_timer(base_text, _VOTES_AUTODEL_SEC),
+                    parse_mode='Markdown', reply_markup=kb,
+                )
+            except Exception:
+                pass
+        return None, base_text, kb
+    else:
+        sent = await target.reply_text(
+            _with_timer(base_text, _VOTES_AUTODEL_SEC),
+            parse_mode='Markdown', reply_markup=kb,
+        )
+        return sent, base_text, kb
+
+
+def _votes_view_keyboard(active: str) -> InlineKeyboardMarkup:
+    """Returns the filter keyboard for /votes view, highlighting the active filter."""
+    def label(text: str, key: str) -> InlineKeyboardButton:
+        return InlineKeyboardButton(
+            text + (" ◀" if active == key else ""),
+            callback_data=f"vview_{key}",
+        )
+    return InlineKeyboardMarkup([[
+        label("📋 Все", "all"),
+        label("✅ Добавленные", "added"),
+        label("⏳ Не добавлены", "notadded"),
+    ]])
+
+
+async def votes_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """
-    Команда /view [stats|votes] — просмотр статистики и голосований.
-    /view stats               — статистика сегодняшнего дня
-    /view votes               — все голоса (сортировка по убыванию)
-    /view votes added         — только добавленные в плейлист лучших
-    /view votes notadded      — только ещё не добавленные
-    /view votes <запрос>      — поиск по названию
-    /view votes notadded <q>  — фильтр + поиск
+    Команда /votes [view|edit|create] — управление голосами за треки.
+    /votes view    — список голосов с кнопками фильтрации (все / добавленные / не добавленные)
+    /votes edit    — личное меню с кнопками удаления голосов
+    /votes create  — проголосовать за одну из последних песен
     """
     args = context.args
 
     if not args:
-        await update.message.reply_text(
-            "ℹ️ *Использование:*\n"
-            "`/view stats` — статистика дня\n"
-            "`/view votes` — все голоса за треки\n"
-            "`/view votes added` — добавленные\n"
-            "`/view votes notadded` — ещё не добавленные\n"
-            "`/view votes <запрос>` — поиск по названию\n"
-            "`/view votes notadded <запрос>` — фильтр + поиск",
+        _help_text = (
+            "ℹ️ *Голоса за треки:*\n"
+            "`/votes view` — список голосов\n"
+            "`/votes edit` — снять свои голоса\n"
+            "`/votes create` — проголосовать за недавнюю песню"
+        )
+        sent = await update.message.reply_text(
+            _with_timer(_help_text, _VOTES_AUTODEL_SEC),
             parse_mode='Markdown',
+        )
+        _schedule_votes_autodelete(
+            context,
+            update.effective_chat.id,
+            sent.message_id,
+            update.message.message_id,
+            base_text=_help_text,
         )
         return
 
     subcommand = args[0].lower()
 
-    # --- /view stats ---
-    if subcommand == 'stats':
-        stats = analytics_engine.get_today_report_data()
-        if not stats:
-            await update.message.reply_text("⚠️ Данных о статистике пока нет.")
-            return
-        await update.message.reply_text(format_stats_message(stats), parse_mode='Markdown')
+    # --- /votes view ---
+    if subcommand == 'view':
+        filter_mode = 'all'
+        rest = args[1:]
+        if rest and rest[0].lower() in ('added', 'notadded'):
+            filter_mode = rest[0].lower()
+        sent, base_text, kb = await _send_votes_view(update.message, filter_mode, edit=False)
+        if sent:
+            _schedule_votes_autodelete(
+                context,
+                update.effective_chat.id,
+                sent.message_id,
+                update.message.message_id,
+                base_text=base_text,
+                kb=kb,
+            )
         return
 
-    # --- /view votes ---
-    if subcommand == 'votes':
-        filter_mode = 'all'
-        search = ''
-        rest = args[1:]
-        if rest:
-            if rest[0].lower() in ('added', 'notadded'):
-                filter_mode = rest[0].lower()
-                search = ' '.join(rest[1:])
+    # --- /votes edit ---
+    if subcommand == 'edit':
+        user_id = update.effective_user.id
+        summary = get_user_votes_summary(user_id)
+        if not summary:
+            base_text = "🗳 *Ваши голоса:*\n\n💭 Вы ещё ни за что не голосовали."
+            sent = await update.message.reply_text(
+                _with_timer(base_text, _VOTES_AUTODEL_SEC), parse_mode='Markdown',
+            )
+            _schedule_votes_autodelete(
+                context, update.effective_chat.id,
+                sent.message_id, update.message.message_id, base_text=base_text,
+            )
+            return
+        rows = []
+        for item in summary:
+            cb = f"rmvote_{item['song_id']}"
+            if len(cb.encode()) > 64:
+                continue
+            status = " ✅" if item['in_best'] else ""
+            label = f"❌ {item['title'][:35]}{status} (+{item['user_votes']})"
+            rows.append([InlineKeyboardButton(label, callback_data=cb)])
+        base_text = "🗳 *Ваши голоса:*\nНажмите кнопку чтобы снять _все_ свои голоса за эту песню."
+        kb = InlineKeyboardMarkup(rows) if rows else None
+        sent = await update.message.reply_text(
+            _with_timer(base_text, _VOTES_AUTODEL_SEC),
+            reply_markup=kb,
+            parse_mode='Markdown',
+        )
+        _schedule_votes_autodelete(
+            context, update.effective_chat.id,
+            sent.message_id, update.message.message_id,
+            base_text=base_text, kb=kb,
+        )
+        return
+
+    # --- /votes create ---
+    if subcommand == 'create':
+        user_id = update.effective_user.id
+        recent_songs = get_recent_songs()[:3]
+        if not recent_songs:
+            base_text = "⚠️ Список недавних песен пуст. Подождите смены трека."
+            sent = await update.message.reply_text(_with_timer(base_text, _VOTES_AUTODEL_SEC))
+            _schedule_votes_autodelete(
+                context, update.effective_chat.id,
+                sent.message_id, update.message.message_id, base_text=base_text,
+            )
+            return
+        rows = []
+        for s in recent_songs:
+            sid = s['song_id']
+            cb = f"vsong_{sid}"
+            if len(cb.encode()) > 64:
+                continue
+            already_best = is_song_in_best(sid)
+            voted_today = not can_user_vote(user_id, sid)
+            cnt = get_song_votes(sid)
+            if already_best:
+                icon = "✅"
+            elif voted_today:
+                icon = "✔️"
             else:
-                search = ' '.join(rest)
-        msg = format_votes_message(filter_mode=filter_mode, search=search)
-        await update.message.reply_text(msg, parse_mode='Markdown')
+                icon = "⬆️"
+            label = f"{icon} {s['display_title'][:35]} ({cnt}/{UPVOTE_THRESHOLD})"
+            rows.append([InlineKeyboardButton(label, callback_data=cb)])
+        if not rows:
+            base_text = "⚠️ Нет доступных песен для голосования."
+            sent = await update.message.reply_text(_with_timer(base_text, _VOTES_AUTODEL_SEC))
+            _schedule_votes_autodelete(
+                context, update.effective_chat.id,
+                sent.message_id, update.message.message_id, base_text=base_text,
+            )
+            return
+        base_text = "🎵 *Недавние песни:*\nВыберите песню для голосования."
+        kb = InlineKeyboardMarkup(rows)
+        sent = await update.message.reply_text(
+            _with_timer(base_text, _VOTES_AUTODEL_SEC),
+            reply_markup=kb,
+            parse_mode='Markdown',
+        )
+        _schedule_votes_autodelete(
+            context, update.effective_chat.id,
+            sent.message_id, update.message.message_id,
+            base_text=base_text, kb=kb,
+        )
         return
 
     await update.message.reply_text(
-        "❌ Неизвестная подкоманда. Используйте `/view stats` или `/view votes`.",
+        "❌ Неизвестная подкоманда. Используйте `/votes view`, `/votes edit` или `/votes create`.",
         parse_mode='Markdown',
     )
 
