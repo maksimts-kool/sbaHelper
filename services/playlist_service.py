@@ -4,27 +4,13 @@ import math
 from datetime import datetime
 
 from core.config import IGNORED_KEYWORDS
+from services.playlist_names import PLAYLIST_NAMES
 
 _intro_was_in_queue = False
 
-# --- НАСТРОЙКА НАЗВАНИЙ ПЛЕЙЛИСТОВ ---
 IGNORED_PLAYLISTS = [
     "intro",
 ]
-
-# Формат: "техническое_имя": "Произносимое имя"
-PLAYLIST_NAMES = {
-    "default": "Общие",
-    "russian": "Русские",
-    "estonian": "Эстонские",
-    "requested": "Запросы",
-    "90s": "90-е",
-    "jazz": "Джаз",
-    "radio 2025": "Радио 2025-го",
-    "bass": "Динамичные",
-    "bi 2": "Би 2",
-    # Добавьте свои плейлисты сюда
-}
 
 
 def get_readable_playlist_name(raw_name):

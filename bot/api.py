@@ -171,6 +171,17 @@ def is_media_in_playlist(song_unique_id: str, playlist_id: int) -> bool:
     return False
 
 
+def get_schedule(rows: int = 48) -> list:
+    """Получает расписание станции (текущие и ближайшие события)."""
+    try:
+        url = f"{AZURACAST_HOST}/api/station/{STATION_ID}/schedule"
+        r = requests.get(url, params={"rows": rows}, timeout=10)
+        return r.json() if r.status_code == 200 else []
+    except Exception as e:
+        logging.error(f"API Error (Schedule): {e}")
+        return []
+
+
 def get_station_history(limit: int = 5) -> list:
     """
     Возвращает последние `limit` сыгранных треков через API истории.

@@ -1,19 +1,22 @@
 """
-Фоновые задачи бота: обновление плеера и ежедневный отчет.
+Фоновые задачи бота: обновление плеера, ежедневный отчет и уведомления расписания.
 """
 import logging
+import time as _time_module
 
 from telegram import InputMediaPhoto
 from telegram.error import BadRequest, NetworkError, TimedOut
 from telegram.ext import ContextTypes
 
 from analytics import engine as analytics_engine
-from bot.api import get_queue_data, get_station_data
+from bot.api import get_queue_data, get_schedule, get_station_data
 from bot.formatters import (
     clean_track_info,
     format_intervals_text,
     format_main_message,
     format_queue_list,
+    format_schedule_ended,
+    format_schedule_started,
     get_keyboard,
 )
 from bot.state import (
@@ -25,6 +28,19 @@ from bot.state import (
     save_chats,
     update_vote_logic,
 )
+
+# --- Состояние джобы расписания (хранится в памяти процесса) ---
+# Ключ: (playlist_id, start_timestamp) — уникальный слот расписания.
+# Простой id не подходит: один плейлист может повторяться в разные дни с тем же id.
+_sched_active_keys: set[tuple[int, int]] = set()
+_sched_active_data: dict[tuple[int, int], dict] = {}
+_sched_initialized: bool = False
+# Последнее уведомление расписания по chat_id: {chat_id: message_id}
+_sched_last_msg: dict[int, int] = {}
+
+
+def _sched_key(item: dict) -> tuple[int, int]:
+    return (item.get('id', 0), item.get('start_timestamp', 0))
 
 
 async def update_display_job(context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -117,6 +133,159 @@ async def update_display_job(context: ContextTypes.DEFAULT_TYPE) -> None:
             CHATS_DB.pop(cid, None)
             LAST_MSG_STATE.pop(cid, None)
         save_chats(CHATS_DB)
+
+
+async def schedule_notify_job(context: ContextTypes.DEFAULT_TYPE) -> None:
+    """
+    Каждую минуту сверяет расписание AzuraCast и отправляет уведомления:
+    — когда начинается запланированный блок;
+    — когда он заканчивается (с информацией о следующем);
+    — совмещённое сообщение при немедленном переходе.
+    """
+    global _sched_active_keys, _sched_active_data, _sched_initialized
+
+    if not CHATS_DB:
+        return
+
+    schedule = get_schedule(rows=48)
+    if not schedule or not isinstance(schedule, list):
+        return
+
+    now_ts = int(_time_module.time())
+
+    # Элементы, активные прямо сейчас (ключ — уникальный слот, а не просто playlist id)
+    active_items: dict[tuple[int, int], dict] = {
+        _sched_key(item): item
+        for item in schedule
+        if isinstance(item, dict) and item.get('is_now')
+    }
+    current_active_keys = set(active_items.keys())
+
+    # Ближайшие ещё не начавшиеся элементы
+    upcoming = sorted(
+        [
+            item for item in schedule
+            if isinstance(item, dict)
+            and not item.get('is_now')
+            and item.get('start_timestamp', 0) > now_ts
+        ],
+        key=lambda x: x.get('start_timestamp', 0),
+    )
+
+    # Все элементы ближайшего блока (одинаковый start_timestamp)
+    next_items: list = []
+    if upcoming:
+        nearest_start = upcoming[0].get('start_timestamp', 0)
+        next_items = [
+            item for item in upcoming
+            if item.get('start_timestamp', 0) == nearest_start
+        ]
+
+    if not _sched_initialized:
+        _sched_active_keys  = current_active_keys
+        _sched_active_data  = active_items
+        _sched_initialized  = True
+        # Если уже что-то играет — уведомляем как о только что начавшемся блоке
+        if current_active_keys:
+            groups: dict[tuple[int, int], list] = {}
+            for item in active_items.values():
+                gkey = (
+                    item.get('start_timestamp', 0) // 60,
+                    item.get('end_timestamp', 0) // 60,
+                )
+                groups.setdefault(gkey, []).append(item)
+            for group_items in groups.values():
+                msg = format_schedule_started(group_items)
+                if msg:
+                    for chat_id in list(CHATS_DB.keys()):
+                        try:
+                            await context.bot.send_message(
+                                chat_id=chat_id,
+                                text=msg,
+                                parse_mode='Markdown',
+                            )
+                        except Exception as exc:
+                            logging.warning(f"Schedule notify (init) -> {chat_id}: {exc}")
+        return
+
+    newly_started_keys = current_active_keys - _sched_active_keys
+    just_ended_keys    = _sched_active_keys - current_active_keys
+
+    if not newly_started_keys and not just_ended_keys:
+        _sched_active_keys  = current_active_keys
+        _sched_active_data  = active_items
+        return
+
+    newly_started = [active_items[k] for k in newly_started_keys]
+    just_ended    = [
+        _sched_active_data[k]
+        for k in just_ended_keys
+        if k in _sched_active_data
+    ]
+
+    _sched_active_keys  = current_active_keys
+    _sched_active_data  = active_items
+
+    messages: list[str] = []
+
+    if newly_started:
+        # Ищем, не является ли это немедленным переходом
+        is_transition = bool(just_ended) and any(
+            abs(s.get('start_timestamp', 0) - e.get('end_timestamp', 0)) <= 120
+            for s in newly_started
+            for e in just_ended
+        )
+
+        # Группируем новые элементы по временному диапазону (точность ±1 мин)
+        groups: dict[tuple[int, int], list] = {}
+        for item in newly_started:
+            key = (
+                item.get('start_timestamp', 0) // 60,
+                item.get('end_timestamp', 0) // 60,
+            )
+            groups.setdefault(key, []).append(item)
+
+        for group_items in groups.values():
+            msg = format_schedule_started(
+                group_items,
+                just_ended if is_transition else None,
+            )
+            if msg:
+                messages.append(msg)
+    elif just_ended:
+        # Блок(и) завершились, новых нет.
+        # Группируем по (start//60, end//60), чтобы плейлисты с одинаковым временем составляли один блок.
+        ended_groups: dict[tuple[int, int], list] = {}
+        for item in just_ended:
+            ekey = (
+                item.get('start_timestamp', 0) // 60,
+                item.get('end_timestamp', 0) // 60,
+            )
+            ended_groups.setdefault(ekey, []).append(item)
+        for ended_group in ended_groups.values():
+            still = list(active_items.values()) or None
+            msg = format_schedule_ended(ended_group, next_items or None, still)
+            if msg:
+                messages.append(msg)
+
+    for msg in messages:
+        for chat_id in list(CHATS_DB.keys()):
+            try:
+                # Удаляем предыдущее уведомление расписания
+                prev_id = _sched_last_msg.get(chat_id)
+                if prev_id:
+                    try:
+                        await context.bot.delete_message(chat_id=chat_id, message_id=prev_id)
+                    except Exception:
+                        pass
+                sent = await context.bot.send_message(
+                    chat_id=chat_id,
+                    text=msg,
+                    parse_mode='Markdown',
+                )
+                _sched_last_msg[chat_id] = sent.message_id
+            except Exception as exc:
+                logging.warning(f"Schedule notify -> {chat_id}: {exc}")
 
 
 async def daily_report_job(context: ContextTypes.DEFAULT_TYPE) -> None:

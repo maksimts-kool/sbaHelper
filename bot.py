@@ -12,7 +12,7 @@ from telegram.request import HTTPXRequest
 
 from bot.api import get_station_history
 from bot.handlers import announcement_command, button_callback, changelog_dm_handler, start, votes_command
-from bot.jobs import daily_report_job, update_display_job
+from bot.jobs import daily_report_job, schedule_notify_job, update_display_job
 from bot.state import add_recent_song
 from core.config import TELEGRAM_TOKEN, TZ_NAME
 
@@ -70,6 +70,13 @@ if __name__ == "__main__":
 
     midnight = time(hour=0, minute=0, second=0, tzinfo=pytz.timezone(TZ_NAME))
     jq.run_daily(daily_report_job, time=midnight, job_kwargs={'misfire_grace_time': 60})
+
+    jq.run_repeating(
+        schedule_notify_job,
+        interval=60,
+        first=15,
+        job_kwargs={'misfire_grace_time': 30, 'max_instances': 1},
+    )
 
     print("Bot started (Optimized for timeouts)...")
     application.run_polling()

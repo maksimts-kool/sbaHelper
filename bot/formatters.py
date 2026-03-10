@@ -10,6 +10,7 @@ from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 from analytics import engine as analytics_engine
 from bot.state import VOTE_STATE, get_all_votes_data, get_skip_progress, get_song_votes, is_song_in_best
 from core.config import IGNORED_KEYWORDS, REQUEST_URL, STREAM_URL, TZ_NAME, UPVOTE_THRESHOLD
+from services.playlist_names import PLAYLIST_NAMES
 
 
 # --- УТИЛИТЫ ---
@@ -95,7 +96,7 @@ def format_main_message(data: dict) -> tuple[str, str, int, str]:
     elapsed = np.get('elapsed', 0)
     duration = np.get('duration', 0)
     playlist_raw = np.get('playlist', 'General')
-    playlist = escape_md(playlist_raw)
+    playlist = escape_md(PLAYLIST_NAMES.get(playlist_raw.lower(), playlist_raw))
 
     is_request = np.get('is_request') or str(playlist_raw).lower() == 'requested'
     req_mark = "🎷 **Заказ!** " if is_request else ""
@@ -151,7 +152,7 @@ def format_queue_list(queue_data: list) -> str:
         text_md = escape_md(clean_text)
 
         playlist_raw = item.get('playlist', '')
-        playlist_md = escape_md(playlist_raw)
+        playlist_md = escape_md(PLAYLIST_NAMES.get(playlist_raw.lower(), playlist_raw))
 
         played_at = item.get('played_at', 0)
         duration = item.get('duration', 0)
@@ -324,3 +325,128 @@ def format_intervals_text(intervals: list) -> str:
             f"({analytics_engine.format_duration(dur)}) | 👥 {i['max']}\n"
         )
     return text
+
+
+# --- РАСПИСАНИЕ ---
+
+_MONTHS_RU = {
+    1: "января", 2: "февраля", 3: "марта", 4: "апреля",
+    5: "мая", 6: "июня", 7: "июля", 8: "августа",
+    9: "сентября", 10: "октября", 11: "ноября", 12: "декабря",
+}
+
+
+def _fmt_sched_time(ts: int) -> str:
+    """Форматирует UNIX-timestamp в HH:MM по таймзоне станции."""
+    tz = pytz.timezone(TZ_NAME)
+    return datetime.fromtimestamp(ts, tz).strftime('%H:%M')
+
+
+def _fmt_sched_date_time(ts: int) -> str:
+    """Форматирует UNIX-timestamp в 'D месяца, HH:MM' по таймзоне станции."""
+    tz = pytz.timezone(TZ_NAME)
+    dt = datetime.fromtimestamp(ts, tz)
+    return f"{dt.day} {_MONTHS_RU[dt.month]}, {dt.strftime('%H:%M')}"
+
+
+def _sched_same_day(ts1: int, ts2: int) -> bool:
+    """True, если оба timestamp приходятся на один календарный день (по TZ станции)."""
+    tz = pytz.timezone(TZ_NAME)
+    return (
+        datetime.fromtimestamp(ts1, tz).date()
+        == datetime.fromtimestamp(ts2, tz).date()
+    )
+
+
+def format_schedule_started(
+    started_items: list,
+    ended_items: list | None = None,
+) -> str:
+    """
+    Сообщение о начале блока расписания.
+    started_items  — новые активные элементы.
+    ended_items    — только что завершившиеся (для совмещённого сообщения).
+    """
+    if not started_items:
+        return ""
+
+    first     = started_items[0]
+    start_ts  = first.get('start_timestamp', 0)
+    end_ts    = first.get('end_timestamp', 0)
+    names     = [escape_md(PLAYLIST_NAMES.get(item.get('name', '').lower(), item.get('name', '?'))) for item in started_items]
+    playlists = ", ".join(names)
+    time_range = (
+        f"{_fmt_sched_time(start_ts)} – {_fmt_sched_time(end_ts)}"
+        if start_ts and end_ts else "?"
+    )
+
+    if ended_items:
+        prev       = ended_items[0]
+        prev_start = prev.get('start_timestamp', 0)
+        prev_end   = prev.get('end_timestamp', 0)
+        prev_range = (
+            f"{_fmt_sched_time(prev_start)} – {_fmt_sched_time(prev_end)}"
+            if prev_start and prev_end else "предыдущий"
+        )
+        return (
+            f"✅ Блок песен *{prev_range}* закончился\n"
+            f"🔄 Сразу начался новый\n"
+            f"🕐 *{time_range}*\n"
+            f"📋 Плейлисты: {playlists}"
+        )
+    return (
+        f"📅 *Начался блок песен*\n"
+        f"🕐 *{time_range}*\n"
+        f"📋 Плейлисты: {playlists}"
+    )
+
+
+def format_schedule_ended(
+    ended_items: list,
+    next_items: list | None = None,
+    still_active: list | None = None,
+) -> str:
+    """Сообщение об окончании блока расписания."""
+    if not ended_items:
+        return ""
+
+    first     = ended_items[0]
+    start_ts  = first.get('start_timestamp', 0)
+    end_ts    = first.get('end_timestamp', 0)
+    time_range = (
+        f"{_fmt_sched_time(start_ts)} – {_fmt_sched_time(end_ts)}"
+        if start_ts and end_ts else "?"
+    )
+    names = ", ".join(escape_md(PLAYLIST_NAMES.get(item.get('name', '').lower(), item.get('name', '?'))) for item in ended_items)
+
+    if still_active:
+        active_names = ", ".join(escape_md(PLAYLIST_NAMES.get(item.get('name', '').lower(), item.get('name', '?'))) for item in still_active)
+        return (
+            f"✅ Блок песен *{time_range}* закончился\n"
+            f"📋 Для: {names}\n"
+            f"🎵 Еще играют: {active_names}"
+        )
+
+    if next_items:
+        n       = next_items[0]
+        n_start = n.get('start_timestamp', 0)
+        n_end   = n.get('end_timestamp', 0)
+        n_start_fmt = _fmt_sched_time(n_start) if n_start else "?"
+        n_end_fmt   = _fmt_sched_time(n_end)   if n_end   else "?"
+        n_names = ", ".join(escape_md(PLAYLIST_NAMES.get(item.get('name', '').lower(), item.get('name', '?'))) for item in next_items)
+        now_ts = int(time_module.time())
+        if n_start and _sched_same_day(now_ts, n_start):
+            next_str = f"в *{n_start_fmt} – {n_end_fmt}*"
+        else:
+            next_str = f"*{_fmt_sched_date_time(n_start)} – {n_end_fmt}*"
+        return (
+            f"✅ Блок песен *{time_range}* закончился\n"
+            f"📋 Для: {names}\n"
+            f"⏭ Следующий блок песен {next_str}\n"
+            f"📋 Для: {n_names}"
+        )
+    return (
+        f"✅ Блок песен *{time_range}* закончился\n"
+        f"📋 Для: {names}\n"
+        f"⏭ Следующих запланированных блоков песен нет"
+    )
