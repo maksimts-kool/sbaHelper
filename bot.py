@@ -7,11 +7,11 @@ from datetime import time
 
 import pytz
 from telegram import BotCommand
-from telegram.ext import ApplicationBuilder, CallbackQueryHandler, CommandHandler
+from telegram.ext import ApplicationBuilder, CallbackQueryHandler, CommandHandler, MessageHandler, filters
 from telegram.request import HTTPXRequest
 
 from bot.api import get_station_history
-from bot.handlers import announcement_command, button_callback, start, votes_command
+from bot.handlers import announcement_command, button_callback, changelog_dm_handler, start, votes_command
 from bot.jobs import daily_report_job, update_display_job
 from bot.state import add_recent_song
 from core.config import TELEGRAM_TOKEN, TZ_NAME
@@ -58,6 +58,7 @@ if __name__ == "__main__":
     application.add_handler(CommandHandler("announcement", announcement_command))
     application.add_handler(CommandHandler("votes", votes_command))
     application.add_handler(CallbackQueryHandler(button_callback))
+    application.add_handler(MessageHandler(filters.TEXT & filters.ChatType.PRIVATE, changelog_dm_handler))
 
     jq = application.job_queue
     jq.run_repeating(

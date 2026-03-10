@@ -19,6 +19,7 @@ from bot.api import (
 )
 from bot.formatters import (
     clean_track_info,
+    format_changelog,
     format_main_message,
     format_playlist_announcement,
     format_queue_list,
@@ -115,6 +116,16 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     """Обрабатывает нажатия inline-кнопок."""
     query = update.callback_query
     user_id = query.from_user.id
+
+    # --- Changelog wizard: skip notes step ---
+    if query.data == "cl_skip_notes":
+        session = _CHANGELOG_SESSIONS.get(user_id)
+        if session:
+            session['data']['notes'] = ''
+            await _cl_publish_changelog(context.bot, user_id, session)
+            del _CHANGELOG_SESSIONS[user_id]
+        await query.answer()
+        return
 
     data = get_station_data()
     if not data:
@@ -368,6 +379,34 @@ async def announcement_command(update: Update, context: ContextTypes.DEFAULT_TYP
 
     args = context.args
 
+    # --- /announcement changes ---
+    if args and args[0].lower() == 'changes':
+        user_id = update.effective_user.id
+        group_chat_id = update.effective_chat.id
+        _CHANGELOG_SESSIONS[user_id] = {
+            'group_chat_id': group_chat_id,
+            'step': 1,
+            'data': {'version': '', 'additions': '', 'changes': '', 'deletions': '', 'notes': ''},
+        }
+        try:
+            await context.bot.send_message(
+                chat_id=user_id,
+                text=(
+                    "📢 *Создание лога обновлений*\n"
+                    f"Лог будет опубликован в чате `{group_chat_id}`.\n\n"
+                    "Отвечайте на каждый вопрос отдельным сообщением."
+                ),
+                parse_mode='Markdown',
+            )
+            await _cl_send_step(context.bot, user_id, 1)
+        except Exception as e:
+            logging.error(f"Changelog: failed to start DM wizard for {user_id}: {e}")
+            await context.bot.send_message(
+                chat_id=group_chat_id,
+                text="❌ Не удалось отправить ЛС. Убедитесь, что вы начали диалог с ботом.",
+            )
+        return
+
     if not args or len(args) < 2 or args[0].lower() != 'playlist':
         await context.bot.send_message(
             chat_id=update.effective_chat.id,
@@ -418,6 +457,90 @@ async def announcement_command(update: Update, context: ContextTypes.DEFAULT_TYP
             )
         except Exception as e:
             logging.error(f"Error sending announcement part: {e}")
+
+
+# ---------------------------------------------------------------------------
+# /announcement changes — Changelog DM wizard
+# ---------------------------------------------------------------------------
+
+_CHANGELOG_SESSIONS: dict[int, dict] = {}
+# user_id -> {group_chat_id, step (1-5), data: {version, additions, changes, deletions, notes}}
+
+_CL_STEPS: dict[int, tuple[str, str]] = {
+    1: (
+        "📋 *Шаг 1/5 — Версия и название*\n"
+        "_Пример: v2.1.0 — Обновление плеера_",
+        "version",
+    ),
+    2: (
+        "➕ *Шаг 2/5 — Добавлено*\n"
+        "Перечислите через запятую или построчно:\n"
+        "_Пример: Новая кнопка, Улучшенный плеер_",
+        "additions",
+    ),
+    3: (
+        "✏️ *Шаг 3/5 — Изменено*\n"
+        "Перечислите через запятую или построчно:",
+        "changes",
+    ),
+    4: (
+        "🗑 *Шаг 4/5 — Удалено*\n"
+        "Перечислите через запятую или построчно:",
+        "deletions",
+    ),
+    5: (
+        "📝 *Шаг 5/5 — Примечания* _(необязательно)_\n"
+        "Отправьте текст или нажмите «Пропустить».",
+        "notes",
+    ),
+}
+
+
+def _cl_step_keyboard(step: int) -> InlineKeyboardMarkup | None:
+    if step == 5:
+        return InlineKeyboardMarkup(
+            [[InlineKeyboardButton("⏭ Пропустить", callback_data="cl_skip_notes")]]
+        )
+    return None
+
+
+async def _cl_send_step(bot, user_id: int, step: int) -> None:
+    prompt, _ = _CL_STEPS[step]
+    kb = _cl_step_keyboard(step)
+    try:
+        await bot.send_message(
+            chat_id=user_id,
+            text=prompt,
+            parse_mode='Markdown',
+            reply_markup=kb,
+        )
+    except Exception as e:
+        logging.warning(f"Changelog: cannot DM user {user_id} at step {step}: {e}")
+
+
+async def _cl_publish_changelog(bot, user_id: int, session: dict) -> None:
+    """Formats and sends the collected changelog to the source group as one message."""
+    d = session['data']
+    text = format_changelog(
+        version=d['version'],
+        additions=d['additions'],
+        changes=d['changes'],
+        deletions=d['deletions'],
+        notes=d['notes'],
+    )
+    group_chat_id = session['group_chat_id']
+    try:
+        await bot.send_message(
+            chat_id=group_chat_id,
+            text=text,
+            parse_mode='Markdown',
+        )
+    except Exception as e:
+        logging.error(f"Changelog: failed to post to group {group_chat_id}: {e}")
+    try:
+        await bot.send_message(chat_id=user_id, text="✅ Лог обновлений опубликован!")
+    except Exception:
+        pass
 
 
 # ---------------------------------------------------------------------------
@@ -714,4 +837,26 @@ async def votes_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         parse_mode='Markdown',
     )
 
+
+async def changelog_dm_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """
+    Handles private DM text messages from admins filling in the changelog wizard.
+    Advances the session step by step; publishes to the group when all steps are done.
+    """
+    user_id = update.effective_user.id
+    session = _CHANGELOG_SESSIONS.get(user_id)
+    if not session:
+        return  # Not in a changelog session — ignore
+
+    step = session['step']
+    _, field = _CL_STEPS[step]
+    session['data'][field] = update.message.text.strip()
+
+    if step < 5:
+        session['step'] += 1
+        await _cl_send_step(context.bot, user_id, session['step'])
+    else:
+        # Step 5 complete — publish
+        await _cl_publish_changelog(context.bot, user_id, session)
+        del _CHANGELOG_SESSIONS[user_id]
 

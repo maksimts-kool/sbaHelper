@@ -255,6 +255,29 @@ def format_playlist_announcement(playlist_info: dict, songs: list) -> list[str]:
     return messages if messages else [header]
 
 
+def _format_changelog_section(text: str) -> str:
+    """Formats a comma- or newline-separated list as Markdown bullet points."""
+    if not text or not text.strip():
+        return "_нет_"
+    items = [item.strip() for item in text.replace('\n', ',').split(',') if item.strip()]
+    if not items:
+        return "_нет_"
+    return "\n".join(f"• {escape_md(item)}" for item in items)
+
+
+def format_changelog(version: str, additions: str, changes: str, deletions: str, notes: str = "") -> str:
+    """Formats the full changelog as a single Telegram message."""
+    parts = [
+        f"📋 *{escape_md(version)}*",
+        f"➕ *Добавлено:*\n{_format_changelog_section(additions)}",
+        f"✏️ *Изменено:*\n{_format_changelog_section(changes)}",
+        f"🗑 *Удалено:*\n{_format_changelog_section(deletions)}",
+    ]
+    if notes and notes.strip():
+        parts.append(f"📝 *Примечания:*\n{escape_md(notes)}")
+    return "\n\n".join(parts)
+
+
 # --- СТАТИСТИКА И ГОЛОСА ---
 
 def format_votes_message(filter_mode: str = 'all', search: str = '') -> str:
