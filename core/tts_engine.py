@@ -74,7 +74,7 @@ class TTSEngine:
         mid_track = mid_track[:mid_needed]
 
         # Lower only the mid section so speech is audible over it
-        mid_track = mid_track - 10
+        mid_track = mid_track - 15
 
         # Assemble: start -> crossfade -> mid_loop -> crossfade -> end
         end_crossfade = min(fade_ms, len(mid_track), len(snd_end))

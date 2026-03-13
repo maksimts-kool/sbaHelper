@@ -29,7 +29,7 @@ STREAM_URL = "https://radio.maksimtsikvasvili24.thkit.ee/listen/sbaradio/radio.m
 REQUEST_URL = "https://radio.maksimtsikvasvili24.thkit.ee/public/sbaradio/embed-requests"
 
 # --- Фильтрация очереди ---
-IGNORED_KEYWORDS = ["intro", "tts next5", "tts time announce", "tts_next5", "tts_time", "tts_schedule"]
+IGNORED_KEYWORDS = ["intro","tts_schedule", "schedule"]
 
 # --- Поднятие песен (Best Playlist) ---
 BEST_PLAYLIST_ID = int(os.getenv("BEST_PLAYLIST_ID", "17"))

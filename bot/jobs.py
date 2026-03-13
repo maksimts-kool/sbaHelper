@@ -11,7 +11,9 @@ from telegram.ext import ContextTypes
 from analytics import engine as analytics_engine
 from bot.api import get_queue_data, get_schedule, get_station_data
 from bot.formatters import (
+    _fmt_sched_time,
     clean_track_info,
+    escape_md,
     format_intervals_text,
     format_main_message,
     format_queue_list,
@@ -19,6 +21,7 @@ from bot.formatters import (
     format_schedule_started,
     get_keyboard,
 )
+from services.playlist_names import PLAYLIST_NAMES
 from bot.state import (
     CHATS_DB,
     LAST_MSG_STATE,
@@ -37,6 +40,8 @@ _sched_active_data: dict[tuple[int, int], dict] = {}
 _sched_initialized: bool = False
 # Последнее уведомление расписания по chat_id: {chat_id: message_id}
 _sched_last_msg: dict[int, int] = {}
+# Ключи блоков, для которых уже отправлено предупреждение «10 минут до конца»
+_sched_warned_10min: set[tuple[int, int]] = set()
 
 
 def _sched_key(item: dict) -> tuple[int, int]:
@@ -49,9 +54,10 @@ async def update_display_job(context: ContextTypes.DEFAULT_TYPE) -> None:
     if not data:
         return
     queue = get_queue_data()
+    schedule = get_schedule(rows=24)
 
     main_text, art, listeners, song_id = format_main_message(data)
-    queue_text = format_queue_list(queue)
+    queue_text = format_queue_list(queue, schedule=schedule)
 
     song_data = data['now_playing']['song']
     display_title = clean_track_info(
@@ -140,9 +146,10 @@ async def schedule_notify_job(context: ContextTypes.DEFAULT_TYPE) -> None:
     Каждую минуту сверяет расписание AzuraCast и отправляет уведомления:
     — когда начинается запланированный блок;
     — когда он заканчивается (с информацией о следующем);
-    — совмещённое сообщение при немедленном переходе.
+    — совмещённое сообщение при немедленном переходе;
+    — предупреждение за 10 минут до конца блока.
     """
-    global _sched_active_keys, _sched_active_data, _sched_initialized
+    global _sched_active_keys, _sched_active_data, _sched_initialized, _sched_warned_10min
 
     if not CHATS_DB:
         return
@@ -267,6 +274,44 @@ async def schedule_notify_job(context: ContextTypes.DEFAULT_TYPE) -> None:
             msg = format_schedule_ended(ended_group, next_items or None, still)
             if msg:
                 messages.append(msg)
+
+    # --- 10-minute end-of-block warning ---
+    _WARN_WINDOW_SEC = 10 * 60  # 10 minutes
+    for key, item in active_items.items():
+        end_ts = item.get('end_timestamp', 0)
+        if not end_ts:
+            continue
+        secs_left = end_ts - now_ts
+        if 0 < secs_left <= _WARN_WINDOW_SEC and key not in _sched_warned_10min:
+            _sched_warned_10min.add(key)
+            # Build next-block info
+            n_str = ""
+            if next_items:
+                n = next_items[0]
+                n_start = n.get('start_timestamp', 0)
+                n_end = n.get('end_timestamp', 0)
+                n_names = ", ".join(
+                    escape_md(PLAYLIST_NAMES.get(i.get('name', '').lower(), i.get('name', '')))
+                    for i in next_items
+                )
+                n_str = (
+                    f"\n⏭ Следующий блок: *{_fmt_sched_time(n_start)} – {_fmt_sched_time(n_end)}*"
+                    f"\n📋 {n_names}"
+                )
+            cur_names = ", ".join(
+                escape_md(PLAYLIST_NAMES.get(i.get('name', '').lower(), i.get('name', '')))
+                for i in active_items.values()
+            )
+            mins_left = int(secs_left // 60) + 1
+            warn_msg = (
+                f"⏰ До конца блока осталось *{mins_left} мин*\n"
+                f"📋 Сейчас: {cur_names}"
+                f"{n_str}"
+            )
+            messages.append(warn_msg)
+
+    # Clean up warned keys that are no longer active
+    _sched_warned_10min = {k for k in _sched_warned_10min if k in active_items}
 
     for msg in messages:
         for chat_id in list(CHATS_DB.keys()):

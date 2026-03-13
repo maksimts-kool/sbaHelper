@@ -91,21 +91,19 @@ def _build_schedule_text(schedules):
             upcoming.append((readable, time_label, start_ts))
 
     upcoming.sort(key=lambda x: x[2])
-    upcoming = upcoming[:5]
 
     parts = []
     if current:
         parts.append(f"Сейчас в эфире: {_join_names(current)}")
 
     if upcoming:
-        grouped = OrderedDict()
-        for name, time_label, _ in upcoming:
-            grouped.setdefault(time_label or "", []).append(name)
-        next_parts = [
-            f"{_join_names(names)} в {tl}" if tl else _join_names(names)
-            for tl, names in grouped.items()
-        ]
-        parts.append("Далее: " + ", ".join(next_parts))
+        # Only announce the very next time block
+        next_ts = upcoming[0][2]
+        next_block = [(name, tl) for name, tl, ts in upcoming if ts == next_ts]
+        names = [n for n, _ in next_block]
+        time_label = next_block[0][1]
+        next_str = f"{_join_names(names)} в {time_label}" if time_label else _join_names(names)
+        parts.append("Далее: " + next_str)
 
     return ". ".join(parts) + "." if parts else None
 

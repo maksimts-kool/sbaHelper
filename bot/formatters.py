@@ -124,10 +124,35 @@ def format_main_message(data: dict) -> tuple[str, str, int, str]:
     return text, art_url, listeners, song_id
 
 
-def format_queue_list(queue_data: list) -> str:
+def _get_active_block_items(schedule: list) -> list:
+    """Returns all currently active schedule items."""
+    if not schedule:
+        return []
+    now_ts = time_module.time()
+    return [
+        item for item in schedule
+        if item.get('is_now') or (item.get('start_timestamp', 0) <= now_ts <= item.get('end_timestamp', 0))
+    ]
+
+
+def format_queue_list(queue_data: list, schedule: list | None = None) -> str:
     """Сообщение 2: Далее в эфире."""
+    # Build schedule block header
+    sched_prefix = ""
+    if schedule:
+        active = _get_active_block_items(schedule)
+        if active:
+            first = active[0]
+            end_ts = first.get('end_timestamp', 0)
+            names = ", ".join(
+                escape_md(PLAYLIST_NAMES.get(item.get('name', '').lower(), item.get('name', '')))
+                for item in active
+            )
+            end_str = _fmt_sched_time(end_ts) if end_ts else "?"
+            sched_prefix = f"📅 *Сейчас:* {names} _(до {end_str})_\n"
+
     if not queue_data or not isinstance(queue_data, list):
-        return "📂 **Очередь воспроизведения пуста.**"
+        return sched_prefix + "📂 **Очередь воспроизведения пуста.**"
 
     lines = []
     count = 0
@@ -178,10 +203,10 @@ def format_queue_list(queue_data: list) -> str:
         count += 1
 
     if not lines:
-        return "📂 **Далее в эфире:**\n_(Только служебные джинглы)_"
+        return sched_prefix + "📂 **Далее в эфире:**\n_(Только служебные джинглы)_"
 
     header = "🔜 **Далее в эфире:**\n━━━━━━━━━━━━━━━━━━\n"
-    return header + "\n".join(lines)
+    return sched_prefix + header + "\n".join(lines)
 
 
 def _fmt_total_duration(total_seconds: float) -> str:

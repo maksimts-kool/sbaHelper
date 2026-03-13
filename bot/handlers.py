@@ -13,6 +13,7 @@ from bot.api import (
     get_playlist_info,
     get_playlist_songs,
     get_queue_data,
+    get_schedule,
     get_station_data,
     is_media_in_playlist,
     skip_song_api,
@@ -76,6 +77,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
     data = get_station_data()
     queue = get_queue_data()
+    schedule = get_schedule(rows=24)
 
     if not data:
         await update.message.reply_text("⚠️ API недоступно.")
@@ -84,7 +86,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     main_text, art, listeners, song_id = format_main_message(data)
     update_vote_logic(song_id)
     kb = get_keyboard(listeners, song_id)
-    queue_text = format_queue_list(queue)
+    queue_text = format_queue_list(queue, schedule=schedule)
 
     try:
         msg_main = await update.message.reply_photo(
