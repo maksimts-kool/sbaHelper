@@ -1,13 +1,13 @@
 """
 TTS Worker — entrypoint.
-Запускает цикл генерации анонсов плейлиста и объявления времени.
+Запускает цикл генерации анонсов плейлиста и расписания.
 """
 import time as time_module
 
 from core.config import API_KEY, AZURACAST_HOST, INTRO_FILE_TEXT, STATION_ID, TTS_VOICE
 from core.azura_client import AzuraClient
 from core.tts_engine import TTSEngine
-from services import playlist_service, time_service
+from services import playlist_service, schedule_service
 
 BASE_API = f"{AZURACAST_HOST}/api"
 
@@ -23,7 +23,7 @@ def main():
         try:
             queue = api.get_queue()
             playlist_service.run(api, tts, queue, INTRO_FILE_TEXT)
-            time_service.run(api, tts, queue, INTRO_FILE_TEXT)
+            schedule_service.run(api, tts)
             time_module.sleep(25)
         except KeyboardInterrupt:
             print("\nОстановлено пользователем.")

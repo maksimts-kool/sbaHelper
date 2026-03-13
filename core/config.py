@@ -14,12 +14,22 @@ TZ_NAME = os.getenv("TZ", "Europe/Tallinn")
 TTS_VOICE = os.getenv("TTS_VOICE", "ru-RU-SvetlanaNeural")
 INTRO_FILE_TEXT = os.getenv("INTRO_FILE_TEXT", "intro")
 
+# --- Schedule TTS ---
+SCHEDULE_PLAYLIST_ID = int(os.getenv("SCHEDULE_PLAYLIST_ID", "18"))
+SCHEDULE_INTERVAL_MIN = int(os.getenv("SCHEDULE_INTERVAL_MIN", "30"))
+
+# --- Background sounds for schedule TTS ---
+BG_START_PATH = os.getenv("BG_START_PATH", os.path.join("assets", "bg_start.mp3"))
+BG_MID_PATH = os.getenv("BG_MID_PATH", os.path.join("assets", "bg_mid.mp3"))
+BG_END_PATH = os.getenv("BG_END_PATH", os.path.join("assets", "bg_end.mp3"))
+BG_FADE_MS = int(os.getenv("BG_FADE_MS", "2500"))
+
 # --- Ссылки ---
 STREAM_URL = "https://radio.maksimtsikvasvili24.thkit.ee/listen/sbaradio/radio.mp3"
 REQUEST_URL = "https://radio.maksimtsikvasvili24.thkit.ee/public/sbaradio/embed-requests"
 
 # --- Фильтрация очереди ---
-IGNORED_KEYWORDS = ["intro", "tts next5", "tts time announce", "tts_next5", "tts_time"]
+IGNORED_KEYWORDS = ["intro", "tts next5", "tts time announce", "tts_next5", "tts_time", "tts_schedule"]
 
 # --- Поднятие песен (Best Playlist) ---
 BEST_PLAYLIST_ID = int(os.getenv("BEST_PLAYLIST_ID", "17"))

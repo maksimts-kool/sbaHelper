@@ -1,0 +1,4 @@
+Place your background sound files here:
+- bg_start.mp3  (intro jingle, plays first)
+- bg_mid.mp3    (loop segment, plays under TTS speech)
+- bg_end.mp3    (outro jingle, plays after speech)

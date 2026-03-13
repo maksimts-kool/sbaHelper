@@ -13,6 +13,14 @@ class AzuraClient:
         r.raise_for_status()
         return r.json()
 
+    def get_schedules(self, rows=10):
+        """Fetch upcoming schedule items from AzuraCast."""
+        url = f"{self.host}/station/{self.station_id}/schedule"
+        params = {"rows": rows}
+        r = requests.get(url, headers=self.headers, params=params, timeout=10)
+        r.raise_for_status()
+        return r.json()
+
     def get_files(self):
         url = f"{self.host}/station/{self.station_id}/files"
         r = requests.get(url, headers=self.headers, timeout=15)

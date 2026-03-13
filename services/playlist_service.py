@@ -1,106 +1,109 @@
 import os
+import time
 import tempfile
-import math
 from datetime import datetime
+from collections import OrderedDict
 
-from core.config import IGNORED_KEYWORDS
+from core.config import SCHEDULE_PLAYLIST_ID
 from services.playlist_names import PLAYLIST_NAMES
 
 _intro_was_in_queue = False
 
-IGNORED_PLAYLISTS = [
-    "intro",
-]
+
+def _get_readable_name(raw_name):
+    return PLAYLIST_NAMES.get(raw_name.lower().strip(), raw_name)
 
 
-def get_readable_playlist_name(raw_name):
-    """Преобразует техническое название плейлиста в читаемое."""
-    return PLAYLIST_NAMES.get(raw_name, raw_name)
+def _join_names(names):
+    if not names:
+        return ""
+    if len(names) == 1:
+        return names[0]
+    return ", ".join(names[:-1]) + " и " + names[-1]
 
 
-def format_times(minutes_list):
-    """Формирует строку вида 'прямо сейчас, через 3 и 5 минут'."""
+def _build_next5_text(schedules):
+    now_ts = time.time()
+    current = []
+    upcoming = []
+
+    for item in schedules:
+        name = item.get("name") or item.get("title") or ""
+        start_ts = item.get("start_timestamp", 0)
+        end_ts = item.get("end_timestamp", 0)
+        is_now = item.get("is_now", False)
+        readable = _get_readable_name(name)
+
+        if is_now or (start_ts <= now_ts <= end_ts):
+            current.append(readable)
+        elif start_ts > now_ts:
+            start_str = item.get("start", "")
+            try:
+                dt = datetime.fromisoformat(start_str)
+                time_label = dt.strftime("%H:%M")
+            except (ValueError, TypeError):
+                time_label = ""
+            upcoming.append((readable, time_label, start_ts))
+
+    upcoming.sort(key=lambda x: x[2])
+    upcoming = upcoming[:5]
+
     parts = []
-    if 0 in minutes_list:
-        parts.append("прямо сейчас")
-    future = [str(m) for m in minutes_list if m > 0]
-    if future:
-        times_str = " и ".join(future) if len(future) < 3 else ", ".join(future)
-        parts.append(f"через {times_str} мин")
-    return ", ".join(parts)
+
+    if current:
+        parts.append(f"Сейчас в эфире: {_join_names(current)}")
+
+    if upcoming:
+        grouped = OrderedDict()
+        for name, time_label, _ in upcoming:
+            grouped.setdefault(time_label or "", []).append(name)
+
+        next_parts = []
+        for time_label, names in grouped.items():
+            combined = _join_names(names)
+            next_parts.append(f"{combined} в {time_label}" if time_label else combined)
+        parts.append("Далее: " + ", ".join(next_parts))
+
+    if not parts:
+        return None
+
+    return ". ".join(parts) + "."
 
 
 def run(api, tts, queue, intro_text):
     global _intro_was_in_queue
 
-    # 1. Поиск Intro в очереди
     intro_in_queue = any(
         (i.get("song", {}).get("text") == intro_text or i.get("song", {}).get("title") == intro_text)
         and not i.get("is_played")
         for i in queue
     )
 
-    # 2. Логика: Интро закончилось (было True, стало False) — генерируем анонс
     if _intro_was_in_queue and not intro_in_queue:
-        print(f"[{datetime.now().strftime('%H:%M:%S')}] [PlaylistService] Intro завершилось. Анализ очереди...")
+        print(f"[{datetime.now().strftime('%H:%M:%S')}] [PlaylistService] Intro finished. Generating schedule announcement...")
 
         try:
-            playlist_timings = {}
-            cumulative_seconds = 0
-            right_now_claimed = False  # «прямо сейчас» может быть только у первого плейлиста
+            schedules = api.get_schedules()
+            if not schedules:
+                print("[PlaylistService] No schedule data.")
+                _intro_was_in_queue = intro_in_queue
+                return
 
-            for item in queue[:10]:
-                raw_pl = (item.get("playlist") or "default").strip()
-                duration = item.get("duration", 0)
-
-                # Пропускаем служебные треки по названию (intro, tts time announce и т.д.)
-                song = item.get("song", {})
-                song_text = (song.get("text") or song.get("title") or "").lower()
-                if any(kw in song_text for kw in IGNORED_KEYWORDS):
-                    cumulative_seconds += duration
-                    continue
-
-                if raw_pl in IGNORED_PLAYLISTS:
-                    cumulative_seconds += duration
-                    continue
-
-                pretty_name = get_readable_playlist_name(raw_pl)
-                start_minute = math.floor(cumulative_seconds / 60)
-
-                # Если этот плейлист встречается впервые и расчёт даёт 0 минут —
-                # разрешаем «прямо сейчас» только однажды.
-                if pretty_name not in playlist_timings:
-                    if start_minute == 0:
-                        if not right_now_claimed:
-                            right_now_claimed = True
-                        else:
-                            start_minute = 1  # сдвигаем: «через 1 мин» вместо второго «прямо сейчас»
-                    playlist_timings[pretty_name] = []
-
-                if start_minute not in playlist_timings[pretty_name]:
-                    playlist_timings[pretty_name].append(start_minute)
-
-                cumulative_seconds += duration
-
-            if not playlist_timings:
-                text = "Далее на радио отличная музыка."
-            else:
-                phrases = []
-                for pl_name, times in playlist_timings.items():
-                    time_str = format_times(times)
-                    phrases.append(f"{pl_name}: {time_str}")
-                text = "Далее в эфире. " + ". ".join(phrases) + "."
-
-            print(f"[PlaylistService] Текст для TTS: {text}")
+            text = _build_next5_text(schedules) or "Далее на радио отличная музыка."
+            print(f"[PlaylistService] TTS text: {text}")
 
             with tempfile.TemporaryDirectory() as td:
                 fpath = os.path.join(td, "next5.mp3")
                 tts.synth(text, fpath)
-                api.upload_file(fpath, "tts_next5.mp3")
-                print("[PlaylistService] Файл tts_next5.mp3 успешно обновлен.")
+                resp = api.upload_file(fpath, "tts_next5.mp3")
+                file_id = resp.get("id")
+                if file_id:
+                    api.set_file_playlist(file_id, SCHEDULE_PLAYLIST_ID)
+
+            print("[PlaylistService] tts_next5.mp3 updated successfully.")
 
         except Exception as e:
-            print(f"[PlaylistService] Ошибка: {e}")
+            print(f"[PlaylistService] Error: {e}")
             import traceback
             traceback.print_exc()
 
