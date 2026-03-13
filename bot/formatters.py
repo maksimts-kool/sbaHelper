@@ -330,13 +330,28 @@ def format_votes_message(filter_mode: str = 'all', search: str = '') -> str:
     if search:
         header += f" \u00b7 `{escape_md(search)}`"
 
-    lines = [header, "━" * 18]
+    separator = "━" * 18
+    base = "\n".join([header, separator])
+    entries = []
     for v in votes_data:
         title = escape_md(v['title'])
         status = "✅" if v['in_best'] else "⏳"
-        lines.append(f"{status} *{title}*\n   — 👍 {v['count']} голосов")
+        entries.append(f"{status} *{title}*\n   — 👍 {v['count']} голосов")
 
-    return "\n".join(lines)
+    # Build message respecting Telegram's 4096-char limit (reserve ~100 for timer suffix)
+    MAX_LEN = 3900
+    result = base
+    shown = 0
+    for entry in entries:
+        candidate = result + "\n" + entry
+        if len(candidate) > MAX_LEN:
+            remaining = len(entries) - shown
+            result += f"\n\n_...и ещё {remaining} треков (используйте фильтры для уточнения)_"
+            break
+        result = candidate
+        shown += 1
+
+    return result
 
 
 def format_intervals_text(intervals: list) -> str:
