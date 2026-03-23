@@ -144,13 +144,13 @@ def format_main_message(data: dict) -> tuple[str, str, int, str]:
 
     text = (
         f"📻 *SBA Radio Live*\n"
-        f"{format_radio_shutdown_notice()}\n\n"
+        f"{format_radio_shutdown_notice()}\n"
         f"―――――――\n"
         f"🎶 *Сейчас играет:*\n{req_mark}{full_title_md}\n"
         f"{progress_bar}\n\n"
         f"📂 *Плейлист:* {playlist}\n"
         f"👥 *Слушают:* {listeners_md}\n"
-        f"🕒 *Обновлено:* {updated_md}\n"
+        f"🕒 *Обновлено:* {updated_md}\n\n"
         f"―――――――\n"
         f"📋 `/votes view` — голоса • `/votes create` — голосовать"
     )
