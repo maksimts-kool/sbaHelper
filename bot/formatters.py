@@ -14,8 +14,8 @@ from services.playlist_names import PLAYLIST_NAMES
 
 
 _RADIO_SHUTDOWN_DATE = date(2026, 4, 30)
-_RADIO_SHUTDOWN_EMOJI = "![](tg://emoji?id=5274099962655816924)"
-_RADIO_COUNTDOWN_EMOJI = "![](tg://emoji?id=5382194935057372936)"
+_RADIO_SHUTDOWN_EMOJI = "![❗️](tg://emoji?id=5274099962655816924)"
+_RADIO_COUNTDOWN_EMOJI = "![⏳](tg://emoji?id=5382194935057372936)"
 
 
 # --- УТИЛИТЫ ---
