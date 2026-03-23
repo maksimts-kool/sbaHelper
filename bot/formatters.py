@@ -85,8 +85,8 @@ def format_radio_shutdown_notice() -> str:
     """Форматирует уведомление о дате отключения радио."""
     days_left = get_radio_shutdown_days_left()
     return (
-        f"{_RADIO_SHUTDOWN_EMOJI} Радио отключается 30\\.04\\.26\\. "
-        f"{_RADIO_COUNTDOWN_EMOJI} Осталось *{days_left}* дней {_RADIO_SHUTDOWN_EMOJI}\\."
+        f"{_RADIO_SHUTDOWN_EMOJI} Радио отключается *30\\.04\\.26*\\. "
+        f"{_RADIO_COUNTDOWN_EMOJI} Осталось *{days_left}* дней\\. {_RADIO_SHUTDOWN_EMOJI}"
     )
 
 
@@ -145,7 +145,7 @@ def format_main_message(data: dict) -> tuple[str, str, int, str]:
     text = (
         f"📻 *SBA Radio Live*\n"
         f"{format_radio_shutdown_notice()}\n"
-        f"―――――――\n"
+        f"―――――――\n\n"
         f"🎶 *Сейчас играет:*\n{req_mark}{full_title_md}\n"
         f"{progress_bar}\n\n"
         f"📂 *Плейлист:* {playlist}\n"
