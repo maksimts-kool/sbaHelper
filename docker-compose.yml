@@ -1,0 +1,45 @@
+services:
+  sbaradio-tts:
+    build: .
+    container_name: sbaradio-tts
+    restart: unless-stopped
+    environment:
+      AZURACAST_HOST: ${AZURACAST_HOST:-}
+      STATION_ID: ${STATION_ID:-2}
+      API_KEY: ${API_KEY:-}
+      TTS_VOICE: ${TTS_VOICE:-ru-RU-SvetlanaNeural}
+      INTRO_FILE_TEXT: ${INTRO_FILE_TEXT:-intro}
+      PYTHONUNBUFFERED: "1"
+
+  sbaradio-bot:
+    build: .
+    container_name: sbaradio-bot
+    restart: unless-stopped
+    # Используем тот же образ, но запускаем другой скрипт
+    command: [ "python", "bot.py" ]
+    volumes:
+      - ./bot_data:/app/bot_data # Сохранение данных аналитики при перезагрузке
+    environment:
+      AZURACAST_HOST: ${AZURACAST_HOST:-}
+      STATION_ID: ${STATION_ID:-2}
+      API_KEY: ${API_KEY:-}
+      TELEGRAM_TOKEN: ${TELEGRAM_TOKEN:-}
+      TZ: ${TZ:-Europe/Tallinn}
+      ADMIN_IDS: ${ADMIN_IDS:-} # Через запятую: 123456789,987654321
+      PYTHONUNBUFFERED: "1"
+
+  downloader-bot:
+    build: .
+    container_name: downloader-bot
+    restart: unless-stopped
+    command: [ "python", "downloader_bot.py" ]
+    volumes:
+      - /tmp/downloader_videos:/tmp/downloader_videos # временные видео
+      - ./cookies:/app/cookies # cookies.txt для TikTok (rw — yt-dlp обновляет токены)
+    environment:
+      DOWNLOADER_BOT_TOKEN: ${DOWNLOADER_BOT_TOKEN:-}
+      ALLOWED_CHAT_IDS: ${ALLOWED_CHAT_IDS:-} # только эта группа; несколько — через запятую
+      MAX_FILE_SIZE_MB: ${MAX_FILE_SIZE_MB:-50} # макс. размер файла для Telegram
+      MAX_DURATION_SEC: ${MAX_DURATION_SEC:-300} # макс. длительность (5 мин)
+      COOKIES_FILE: ${COOKIES_FILE:-/app/cookies/tiktok.txt}
+      PYTHONUNBUFFERED: "1"
