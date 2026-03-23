@@ -90,7 +90,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
     try:
         msg_main = await update.message.reply_photo(
-            photo=art, caption=main_text, reply_markup=kb, parse_mode='Markdown'
+            photo=art, caption=main_text, reply_markup=kb, parse_mode='MarkdownV2'
         )
         msg_queue = await update.message.reply_text(text=queue_text, parse_mode='Markdown')
 

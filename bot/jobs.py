@@ -14,9 +14,11 @@ from bot.formatters import (
     _fmt_sched_time,
     clean_track_info,
     escape_md,
+    escape_md_v2,
     format_intervals_text,
     format_main_message,
     format_queue_list,
+    format_radio_shutdown_notice,
     format_schedule_ended,
     format_schedule_started,
     get_keyboard,
@@ -98,7 +100,7 @@ async def update_display_job(context: ContextTypes.DEFAULT_TYPE) -> None:
                     await context.bot.edit_message_media(
                         chat_id=chat_id,
                         message_id=main_id,
-                        media=InputMediaPhoto(media=art, caption=main_text, parse_mode='Markdown'),
+                        media=InputMediaPhoto(media=art, caption=main_text, parse_mode='MarkdownV2'),
                         reply_markup=kb,
                     )
                 elif kb_changed:
@@ -343,23 +345,35 @@ async def daily_report_job(context: ContextTypes.DEFAULT_TYPE) -> None:
 
     stats = analytics_engine.rotate_daily_logs()
 
+    shutdown_notice = format_radio_shutdown_notice()
+
     if not stats:
-        msg = "🏁 *Итоги дня*\n━━━━━━━━━━\n🤷‍♂️ Данных о слушателях не было."
+        msg = (
+            "🏁 *Итоги дня*\n"
+            "━━━━━━━━━━\n"
+            "🤷‍♂️ Данных о слушателях не было\\.\n"
+            f"{shutdown_notice}"
+        )
     else:
-        intervals = format_intervals_text(stats['intervals'])
+        intervals = format_intervals_text(stats['intervals']).rstrip()
         trend = stats['change_percent']
         emoji = "📈" if trend >= 0 else "📉"
+        date_md = stats['date'].replace('-', '\\-')
+        max_md = str(stats['max'])
+        avg_md = escape_md_v2(f"{stats['avg']:.1f}")
+        trend_md = escape_md_v2(f"{trend:+.1f}%")
         msg = (
-            f"🏁 *Итоги дня* ({stats['date']})\n━━━━━━━━━━\n"
-            f"👥 Пик: *{stats['max']}*\n"
-            f"📊 Среднее: *{stats['avg']:.1f}*\n"
-            f"{emoji} Динамика: *{trend:+.1f}%*\n"
-            f"━━━━━━━━━━{intervals}"
+            f"🏁 *Итоги дня* \\({date_md}\\)\n━━━━━━━━━━\n"
+            f"👥 Пик: *{max_md}*\n"
+            f"📊 Среднее: *{avg_md}*\n"
+            f"{emoji} Динамика: *{trend_md}*\n"
+            f"━━━━━━━━━━{intervals}\n"
+            f"{shutdown_notice}"
         )
 
     for chat_id in list(CHATS_DB.keys()):
         try:
-            await context.bot.send_message(chat_id=chat_id, text=msg, parse_mode='Markdown')
+            await context.bot.send_message(chat_id=chat_id, text=msg, parse_mode='MarkdownV2')
             logging.info(f"Report sent to {chat_id}")
         except Exception as e:
             logging.error(f"Failed to send report to {chat_id}: {e}")

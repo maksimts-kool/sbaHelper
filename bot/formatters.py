@@ -2,7 +2,7 @@
 Функции форматирования текста и клавиатуры для сообщений бота.
 """
 import time as time_module
-from datetime import datetime
+from datetime import date, datetime
 
 import pytz
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
@@ -13,6 +13,11 @@ from core.config import IGNORED_KEYWORDS, REQUEST_URL, STREAM_URL, TZ_NAME, UPVO
 from services.playlist_names import PLAYLIST_NAMES
 
 
+_RADIO_SHUTDOWN_DATE = date(2026, 4, 30)
+_RADIO_SHUTDOWN_EMOJI = "![](tg://emoji?id=5274099962655816924)"
+_RADIO_COUNTDOWN_EMOJI = "![](tg://emoji?id=5382194935057372936)"
+
+
 # --- УТИЛИТЫ ---
 
 def escape_md(text: str) -> str:
@@ -20,6 +25,15 @@ def escape_md(text: str) -> str:
     if not text:
         return ""
     for char in ['_', '*', '`', '[', ']']:
+        text = text.replace(char, f"\\{char}")
+    return text
+
+
+def escape_md_v2(text: str) -> str:
+    """Экранирует спецсимволы для MarkdownV2."""
+    if not text:
+        return ""
+    for char in ['_', '*', '[', ']', '(', ')', '~', '`', '>', '#', '+', '-', '=', '|', '{', '}', '.', '!']:
         text = text.replace(char, f"\\{char}")
     return text
 
@@ -60,6 +74,22 @@ def create_progress_bar(elapsed, total, length=10) -> str:
     return f"`{format_duration(elapsed)} {bar} {format_duration(total)}`"
 
 
+def get_radio_shutdown_days_left() -> int:
+    """Возвращает количество дней до отключения радио по таймзоне станции."""
+    tz = pytz.timezone(TZ_NAME)
+    today = datetime.now(tz).date()
+    return max((_RADIO_SHUTDOWN_DATE - today).days, 0)
+
+
+def format_radio_shutdown_notice() -> str:
+    """Форматирует уведомление о дате отключения радио."""
+    days_left = get_radio_shutdown_days_left()
+    return (
+        f"{_RADIO_SHUTDOWN_EMOJI} Радио отключается 30\\.04\\.26\\. "
+        f"{_RADIO_COUNTDOWN_EMOJI} Осталось *{days_left}* дней {_RADIO_SHUTDOWN_EMOJI}\\."
+    )
+
+
 # --- КЛАВИАТУРА ---
 
 def get_keyboard(listeners: int, song_id: str = None) -> InlineKeyboardMarkup:
@@ -96,30 +126,33 @@ def format_main_message(data: dict) -> tuple[str, str, int, str]:
     elapsed = np.get('elapsed', 0)
     duration = np.get('duration', 0)
     playlist_raw = np.get('playlist', 'General')
-    playlist = escape_md(PLAYLIST_NAMES.get(playlist_raw.lower(), playlist_raw))
+    playlist = escape_md_v2(PLAYLIST_NAMES.get(playlist_raw.lower(), playlist_raw))
 
     is_request = np.get('is_request') or str(playlist_raw).lower() == 'requested'
-    req_mark = "🎷 **Заказ!** " if is_request else ""
+    req_mark = "🎷 *Заказ\\!* " if is_request else ""
 
     raw_title = song.get('text', 'Unknown')
     raw_artist = song.get('artist', '')
     raw_track = song.get('title', '')
-    full_title_md = escape_md(clean_track_info(raw_artist, raw_track, raw_title))
+    full_title_md = escape_md_v2(clean_track_info(raw_artist, raw_track, raw_title))
 
     art_url = song.get('art', '')
     progress_bar = create_progress_bar(elapsed, duration)
     tz = pytz.timezone(TZ_NAME)
+    listeners_md = escape_md_v2(str(listeners))
+    updated_md = escape_md_v2(datetime.now(tz).strftime('%H:%M:%S'))
 
     text = (
-        f"📻 **SBA Radio Live**\n\n"
+        f"📻 *SBA Radio Live*\n"
+        f"{format_radio_shutdown_notice()}\n\n"
         f"―――――――\n"
-        f"🎶 **Сейчас играет:**\n{req_mark}{full_title_md}\n"
+        f"🎶 *Сейчас играет:*\n{req_mark}{full_title_md}\n"
         f"{progress_bar}\n\n"
-        f"📂 **Плейлист:** {playlist}\n"
-        f"👥 **Слушают:** {listeners}\n"
-        f"🕒 **Обновлено:** {datetime.now(tz).strftime('%H:%M:%S')}\n"
+        f"📂 *Плейлист:* {playlist}\n"
+        f"👥 *Слушают:* {listeners_md}\n"
+        f"🕒 *Обновлено:* {updated_md}\n"
         f"―――――――\n"
-        f"📋 `/votes view` — голоса \u2022 `/votes create` — голосовать"
+        f"📋 `/votes view` — голоса • `/votes create` — голосовать"
     )
     return text, art_url, listeners, song_id
 
@@ -356,13 +389,14 @@ def format_votes_message(filter_mode: str = 'all', search: str = '') -> str:
 
 def format_intervals_text(intervals: list) -> str:
     if not intervals:
-        return "\n😴 Активности не было."
-    text = "\n⏱ **Активность по времени:**\n"
+        return "\n😴 Активности не было\\."
+    text = "\n⏱ *Активность по времени:*\n"
     for idx, i in enumerate(intervals, 1):
         dur = i['end_ts'] - i['start_ts']
+        duration_text = escape_md_v2(analytics_engine.format_duration(dur))
         text += (
             f"{idx}️⃣ `{i['start']} — {i['end']}` "
-            f"({analytics_engine.format_duration(dur)}) | 👥 {i['max']}\n"
+            f"\\({duration_text}\\) \\| 👥 {i['max']}\n"
         )
     return text
 
