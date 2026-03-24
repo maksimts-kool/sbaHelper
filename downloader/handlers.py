@@ -25,6 +25,10 @@ from downloader.core import (
 
 logger = logging.getLogger(__name__)
 
+INFO_EMOJI = '<tg-emoji emoji-id="5231012545799666522"></tg-emoji>'
+DOWNLOAD_EMOJI = '<tg-emoji emoji-id="5386367538735104399"></tg-emoji>'
+SEND_VIDEO_EMOJI = '<tg-emoji emoji-id="5201691993775818138"></tg-emoji>'
+
 
 # --------------------------------------------------------------------------- #
 #  Вспомогательные функции                                                     #
@@ -86,7 +90,10 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     logger.info("[%s] %s requested URL: %s", chat_label, user_label, url)
 
     # --- 1. Получаем информацию ---
-    status_msg = await message.reply_text("🔍 Получаю информацию о видео...")
+    status_msg = await message.reply_text(
+        f"{INFO_EMOJI} Получаю информацию о видео...",
+        parse_mode="HTML",
+    )
 
     loop = asyncio.get_running_loop()
 
@@ -114,7 +121,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         status_msg,
         f"📹 <b>{info.title}</b>\n"
         f"👤 {info.uploader}{duration_str}\n\n"
-        f"⬇️ Скачиваю видео...",
+        f"{DOWNLOAD_EMOJI} Скачиваю видео...",
     )
     await context.bot.send_chat_action(chat_id=chat_id, action=ChatAction.UPLOAD_VIDEO)
 
@@ -137,7 +144,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
                     status_msg,
                     f"📹 <b>{info.title}</b>\n"
                     f"👤 {info.uploader}{duration_str}\n\n"
-                    f"⬇️ Скачиваю: [{bar}] {rounded}%",
+                    f"{DOWNLOAD_EMOJI} Скачиваю: [{bar}] {rounded}%",
                 ),
                 loop,
             )
@@ -172,7 +179,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         status_msg,
         f"📹 <b>{info.title}</b>\n"
         f"👤 {info.uploader}{duration_str}\n\n"
-        f"📤 Отправляю видео...",
+        f"{SEND_VIDEO_EMOJI} Отправляю видео...",
     )
     await context.bot.send_chat_action(chat_id=chat_id, action=ChatAction.UPLOAD_VIDEO)
 
