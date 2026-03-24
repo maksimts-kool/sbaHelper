@@ -4,6 +4,10 @@
 import os
 import re
 
+from dotenv import load_dotenv
+
+load_dotenv()
+
 # --- Telegram ---
 DOWNLOADER_BOT_TOKEN = os.getenv("DOWNLOADER_BOT_TOKEN", "")
 

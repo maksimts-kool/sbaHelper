@@ -5,16 +5,20 @@ Downloader Bot — entrypoint.
 import logging
 
 from telegram import BotCommand
-from telegram.ext import ApplicationBuilder, MessageHandler, filters
+from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes, MessageHandler, filters
 from telegram.request import HTTPXRequest
 
 from downloader.config import DOWNLOADER_BOT_TOKEN
 from downloader.handlers import handle_message
+from monitoring.logging_utils import configure_logging
+from monitoring.runtime import HeartbeatMonitor
+from monitoring.sentry import init_sentry
 
-logging.basicConfig(
-    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
-    level=logging.INFO,
-)
+configure_logging("downloader-bot")
+init_sentry("downloader-bot")
+logger = logging.getLogger(__name__)
+monitor = HeartbeatMonitor("downloader-bot")
+
 # yt-dlp и httpx слишком шумят на DEBUG, оставляем им WARNING
 logging.getLogger("yt_dlp").setLevel(logging.WARNING)
 logging.getLogger("httpx").setLevel(logging.WARNING)
@@ -30,16 +34,33 @@ if __name__ == "__main__":
     ]
 
     async def post_init(app):
+        monitor.beat(status="starting")
         await app.bot.set_my_commands(BOT_COMMANDS)
         me = await app.bot.get_me()
-        logging.info("=== Downloader bot started ===")
-        logging.info("Bot: @%s (id=%s)", me.username, me.id)
+        logger.info("=== Downloader bot started ===")
+        logger.info("Bot: @%s (id=%s)", me.username, me.id)
         from downloader.config import ALLOWED_CHAT_IDS, MAX_DURATION_SEC, MAX_FILE_SIZE_MB
         if ALLOWED_CHAT_IDS:
-            logging.info("Allowed chats: %s", ALLOWED_CHAT_IDS)
+            logger.info("Allowed chats: %s", ALLOWED_CHAT_IDS)
         else:
-            logging.warning("ALLOWED_CHAT_IDS is empty — bot responds everywhere!")
-        logging.info("Limits: max %d MB, max %d sec", MAX_FILE_SIZE_MB, MAX_DURATION_SEC)
+            logger.warning("ALLOWED_CHAT_IDS is empty — bot responds everywhere!")
+        logger.info("Limits: max %d MB, max %d sec", MAX_FILE_SIZE_MB, MAX_DURATION_SEC)
+        monitor.beat(status="running", bot_username=me.username, allowed_chats=len(ALLOWED_CHAT_IDS))
+
+    async def post_shutdown(app):
+        monitor.stop()
+
+    async def heartbeat_job(context: ContextTypes.DEFAULT_TYPE) -> None:
+        from downloader.config import ALLOWED_CHAT_IDS
+
+        monitor.beat(status="running", allowed_chats=len(ALLOWED_CHAT_IDS))
+
+    async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
+        exc_info = None
+        if context.error is not None:
+            exc_info = (type(context.error), context.error, context.error.__traceback__)
+        logger.error("Unhandled downloader bot error", exc_info=exc_info)
+        monitor.fail("telegram error", error=str(context.error))
 
     request = HTTPXRequest(
         connection_pool_size=8,
@@ -53,12 +74,11 @@ if __name__ == "__main__":
         .token(DOWNLOADER_BOT_TOKEN)
         .request(request)
         .post_init(post_init)
+        .post_shutdown(post_shutdown)
         .build()
     )
 
     # /start — краткая инструкция
-    from telegram.ext import CommandHandler
-
     async def cmd_start(update, context):
         await update.message.reply_text(
             "👋 Привет! Я скачиваю видео из <b>TikTok</b> и <b>YouTube Shorts</b>.\n\n"
@@ -75,6 +95,15 @@ if __name__ == "__main__":
     # Обработчик всех текстовых сообщений и подписей к медиа
     application.add_handler(
         MessageHandler(filters.TEXT | filters.CAPTION, handle_message)
+    )
+    application.add_error_handler(error_handler)
+
+    jq = application.job_queue
+    jq.run_repeating(
+        heartbeat_job,
+        interval=60,
+        first=5,
+        job_kwargs={'misfire_grace_time': 30, 'max_instances': 1},
     )
 
     application.run_polling(drop_pending_updates=True)

@@ -30,14 +30,17 @@ from bot.state import (
     VOTE_STATE,
     add_recent_song,
     get_song_votes,
+    load_schedule_notify_state,
     save_chats,
+    save_schedule_notify_state,
     update_vote_logic,
 )
 
-# --- Состояние джобы расписания (хранится в памяти процесса) ---
+# --- Состояние джобы расписания ---
 # Ключ: (playlist_id, start_timestamp) — уникальный слот расписания.
 # Простой id не подходит: один плейлист может повторяться в разные дни с тем же id.
-_sched_active_keys: set[tuple[int, int]] = set()
+_sched_state = load_schedule_notify_state()
+_sched_active_keys: set[tuple[int, int]] = set(_sched_state['active_keys'])
 _sched_active_data: dict[tuple[int, int], dict] = {}
 _sched_initialized: bool = False
 # Последнее уведомление расписания по chat_id: {chat_id: message_id}
@@ -50,13 +53,17 @@ def _sched_key(item: dict) -> tuple[int, int]:
     return (item.get('id', 0), item.get('start_timestamp', 0))
 
 
+def _persist_sched_state() -> None:
+    save_schedule_notify_state(_sched_active_keys)
+
+
 async def update_display_job(context: ContextTypes.DEFAULT_TYPE) -> None:
     """Периодически обновляет плеер и очередь во всех активных чатах."""
-    data = get_station_data()
+    data = await get_station_data()
     if not data:
         return
-    queue = get_queue_data()
-    schedule = get_schedule(rows=24)
+    queue = await get_queue_data()
+    schedule = await get_schedule(rows=24)
 
     main_text, art, listeners, song_id = format_main_message(data)
     queue_text = format_queue_list(queue, schedule=schedule)
@@ -156,7 +163,7 @@ async def schedule_notify_job(context: ContextTypes.DEFAULT_TYPE) -> None:
     if not CHATS_DB:
         return
 
-    schedule = get_schedule(rows=48)
+    schedule = await get_schedule(rows=48)
     if not schedule or not isinstance(schedule, list):
         return
 
@@ -169,6 +176,7 @@ async def schedule_notify_job(context: ContextTypes.DEFAULT_TYPE) -> None:
         if isinstance(item, dict) and item.get('is_now')
     }
     current_active_keys = set(active_items.keys())
+    persisted_active_keys = set(_sched_active_keys)
 
     # Ближайшие ещё не начавшиеся элементы
     upcoming = sorted(
@@ -194,8 +202,10 @@ async def schedule_notify_job(context: ContextTypes.DEFAULT_TYPE) -> None:
         _sched_active_keys  = current_active_keys
         _sched_active_data  = active_items
         _sched_initialized  = True
-        # Если уже что-то играет — уведомляем как о только что начавшемся блоке
-        if current_active_keys:
+        _persist_sched_state()
+        # После рестарта не дублируем сообщение о том же активном блоке.
+        # Если активный блок уже был сохранён в прошлом запуске, просто продолжаем ждать изменений.
+        if current_active_keys and current_active_keys != persisted_active_keys:
             groups: dict[tuple[int, int], list] = {}
             for item in active_items.values():
                 gkey = (
@@ -234,6 +244,7 @@ async def schedule_notify_job(context: ContextTypes.DEFAULT_TYPE) -> None:
 
     _sched_active_keys  = current_active_keys
     _sched_active_data  = active_items
+    _persist_sched_state()
 
     messages: list[str] = []
 

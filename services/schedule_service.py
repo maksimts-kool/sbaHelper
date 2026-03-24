@@ -4,6 +4,7 @@ ScheduleService — regenerates TTS schedule announcement on three triggers:
   2. Block boundary — active schedule items change (block starts or ends)
   3. Schedule data change — admin edited the schedule in AzuraCast
 """
+import logging
 import os
 import time
 import hashlib
@@ -21,6 +22,8 @@ from core.config import (
     BG_FADE_MS,
 )
 from services.playlist_names import PLAYLIST_NAMES
+
+logger = logging.getLogger(__name__)
 
 _last_run_slot = None          # (hour, slot_index) — interval trigger
 _last_active_keys = None       # frozenset of (id, start_ts) — block boundary trigger
@@ -111,10 +114,10 @@ def _build_schedule_text(schedules):
 def _generate_and_upload(api, tts, schedules, reason):
     text = _build_schedule_text(schedules)
     if not text:
-        print(f"[ScheduleService] Nothing to announce ({reason}).")
+        logger.info("[ScheduleService] Nothing to announce (%s).", reason)
         return
 
-    print(f"[{datetime.now().strftime('%H:%M:%S')}] [ScheduleService] [{reason}] {text}")
+    logger.info("[%s] [ScheduleService] [%s] %s", datetime.now().strftime('%H:%M:%S'), reason, text)
 
     has_bg = all(os.path.isfile(p) for p in (BG_START_PATH, BG_MID_PATH, BG_END_PATH))
 
@@ -134,7 +137,7 @@ def _generate_and_upload(api, tts, schedules, reason):
         if file_id:
             api.set_file_playlist(file_id, SCHEDULE_PLAYLIST_ID)
 
-    print(f"[ScheduleService] tts_schedule.mp3 updated ({reason}).")
+    logger.info("[ScheduleService] tts_schedule.mp3 updated (%s).", reason)
 
 
 # ---------------------------------------------------------------------------
@@ -147,7 +150,7 @@ def run(api, tts):
     try:
         schedules = api.get_schedules()
         if not schedules:
-            print("[ScheduleService] No schedule data from API.")
+            logger.warning("[ScheduleService] No schedule data from API.")
             return
 
         slot = _current_slot()
@@ -185,6 +188,4 @@ def run(api, tts):
         _last_schedule_hash = shash
 
     except Exception as e:
-        print(f"[ScheduleService] Error: {e}")
-        import traceback
-        traceback.print_exc()
+        logger.exception("[ScheduleService] Error: %s", e)

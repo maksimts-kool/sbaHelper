@@ -7,19 +7,24 @@ from datetime import time
 
 import pytz
 from telegram import BotCommand
+from telegram import Update
 from telegram.ext import ApplicationBuilder, CallbackQueryHandler, CommandHandler, MessageHandler, filters
+from telegram.ext import ContextTypes
 from telegram.request import HTTPXRequest
 
-from bot.api import get_station_history
+from bot.api import close_api_client, get_station_history
 from bot.handlers import announcement_command, button_callback, changelog_dm_handler, start, votes_command
 from bot.jobs import daily_report_job, schedule_notify_job, update_display_job
-from bot.state import add_recent_song
+from bot.state import CHATS_DB, add_recent_song
 from core.config import TELEGRAM_TOKEN, TZ_NAME
+from monitoring.logging_utils import configure_logging
+from monitoring.runtime import HeartbeatMonitor
+from monitoring.sentry import init_sentry
 
-logging.basicConfig(
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    level=logging.INFO,
-)
+configure_logging("sbaradio-bot")
+init_sentry("sbaradio-bot")
+logger = logging.getLogger(__name__)
+monitor = HeartbeatMonitor("sbaradio-bot")
 
 
 if __name__ == "__main__":
@@ -33,10 +38,12 @@ if __name__ == "__main__":
     ]
 
     async def post_init(app):
+        monitor.beat(status="starting", active_chats=len(CHATS_DB))
         await app.bot.set_my_commands(BOT_COMMANDS)
-        # Pre-seed recent songs from history so /votes create works on a fresh start
-        import asyncio
-        history = await asyncio.get_event_loop().run_in_executor(None, lambda: get_station_history(5))
+        me = await app.bot.get_me()
+        logger.info("=== Bot started ===")
+        logger.info("Bot: @%s (id=%s)", me.username, me.id)
+        history = await get_station_history(5)
         for entry in reversed(history):  # oldest first so newest ends up at index 0
             add_recent_song(
                 entry['song_id'],
@@ -44,6 +51,21 @@ if __name__ == "__main__":
                 artist=entry['artist'],
                 title=entry['title'],
             )
+        monitor.beat(status="running", active_chats=len(CHATS_DB), bot_username=me.username)
+
+    async def post_shutdown(app):
+        monitor.stop(active_chats=len(CHATS_DB))
+        await close_api_client()
+
+    async def heartbeat_job(context: ContextTypes.DEFAULT_TYPE) -> None:
+        monitor.beat(status="running", active_chats=len(CHATS_DB))
+
+    async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
+        exc_info = None
+        if context.error is not None:
+            exc_info = (type(context.error), context.error, context.error.__traceback__)
+        logger.error("Unhandled telegram bot error", exc_info=exc_info)
+        monitor.fail("telegram error", error=str(context.error), active_chats=len(CHATS_DB))
 
     request = HTTPXRequest(
         connection_pool_size=10,
@@ -52,13 +74,21 @@ if __name__ == "__main__":
         connect_timeout=20.0,
     )
 
-    application = ApplicationBuilder().token(TELEGRAM_TOKEN).request(request).post_init(post_init).build()
+    application = (
+        ApplicationBuilder()
+        .token(TELEGRAM_TOKEN)
+        .request(request)
+        .post_init(post_init)
+        .post_shutdown(post_shutdown)
+        .build()
+    )
 
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("announcement", announcement_command))
     application.add_handler(CommandHandler("votes", votes_command))
     application.add_handler(CallbackQueryHandler(button_callback))
     application.add_handler(MessageHandler(filters.TEXT & filters.ChatType.PRIVATE, changelog_dm_handler))
+    application.add_error_handler(error_handler)
 
     jq = application.job_queue
     jq.run_repeating(
@@ -75,6 +105,13 @@ if __name__ == "__main__":
         schedule_notify_job,
         interval=60,
         first=15,
+        job_kwargs={'misfire_grace_time': 30, 'max_instances': 1},
+    )
+
+    jq.run_repeating(
+        heartbeat_job,
+        interval=60,
+        first=5,
         job_kwargs={'misfire_grace_time': 30, 'max_instances': 1},
     )
 

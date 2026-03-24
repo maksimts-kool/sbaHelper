@@ -75,9 +75,9 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         del CHATS_DB[chat_id]
         LAST_MSG_STATE.pop(chat_id, None)
 
-    data = get_station_data()
-    queue = get_queue_data()
-    schedule = get_schedule(rows=24)
+    data = await get_station_data()
+    queue = await get_queue_data()
+    schedule = await get_schedule(rows=24)
 
     if not data:
         await update.message.reply_text("⚠️ API недоступно.")
@@ -129,7 +129,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         await query.answer()
         return
 
-    data = get_station_data()
+    data = await get_station_data()
     if not data:
         await query.answer("⚠️ API недоступно.", show_alert=True)
         return
@@ -149,7 +149,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         votes += 1
 
         if votes >= required:
-            success, msg = skip_song_api()
+            success, msg = await skip_song_api()
             msg_text = "✅ Пропускаем!" if success else f"Ошибка: {msg}"
             await query.answer(msg_text, show_alert=True)
         else:
@@ -195,7 +195,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         song_data = data['now_playing']['song']
         artist = song_data.get('artist', '')
         title = song_data.get('title', '')
-        if is_media_in_playlist(song_id, BEST_PLAYLIST_ID):
+        if await is_media_in_playlist(song_id, BEST_PLAYLIST_ID):
             mark_song_as_best(song_id)
             await query.answer("✅ Эта песня уже в плейлисте лучших!", show_alert=True)
             try:
@@ -224,9 +224,9 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             except Exception:
                 pass
             # Добавляем в плейлист 16
-            media = find_media_file(song_id, artist, title)
+            media = await find_media_file(song_id, artist, title)
             if media:
-                ok, result = add_media_to_playlist(media['id'], BEST_PLAYLIST_ID)
+                ok, result = await add_media_to_playlist(media['id'], BEST_PLAYLIST_ID)
                 if ok:
                     mark_song_as_best(song_id)
                 else:
@@ -300,7 +300,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             await query.answer("⏳ Сегодня вы уже голосовали за эту песню.", show_alert=True)
             return
 
-        if is_media_in_playlist(target_song_id, BEST_PLAYLIST_ID):
+        if await is_media_in_playlist(target_song_id, BEST_PLAYLIST_ID):
             mark_song_as_best(target_song_id)
             await query.answer("✅ Эта песня уже в плейлисте лучших!", show_alert=True)
             return
@@ -320,9 +320,9 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
                 f"⏳ Набрано {new_count} голосов! Добавляю в лучшие...",
                 show_alert=True,
             )
-            media = find_media_file(target_song_id, s_artist, s_title)
+            media = await find_media_file(target_song_id, s_artist, s_title)
             if media:
-                ok, result = add_media_to_playlist(media['id'], BEST_PLAYLIST_ID)
+                ok, result = await add_media_to_playlist(media['id'], BEST_PLAYLIST_ID)
                 if ok:
                     mark_song_as_best(target_song_id)
                 else:
@@ -430,12 +430,12 @@ async def announcement_command(update: Update, context: ContextTypes.DEFAULT_TYP
         text="⏳ Загружаю информацию о плейлисте...",
     )
 
-    playlist_info = get_playlist_info(playlist_id)
+    playlist_info = await get_playlist_info(playlist_id)
     if not playlist_info:
         await loading_msg.edit_text(f"❌ Плейлист с ID {playlist_id} не найден или API недоступен.")
         return
 
-    songs = get_playlist_songs(playlist_id)
+    songs = await get_playlist_songs(playlist_id)
     messages = format_playlist_announcement(playlist_info, songs)
 
     # Replace loading message with first part, send the rest

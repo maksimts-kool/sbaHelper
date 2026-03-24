@@ -1,5 +1,9 @@
 import os
 
+from dotenv import load_dotenv
+
+load_dotenv()
+
 # --- AzuraCast ---
 AZURACAST_HOST = os.getenv("AZURACAST_HOST", "https://radio.maksimtsikvasvili24.thkit.ee")
 STATION_ID = int(os.getenv("STATION_ID", "2"))
@@ -38,6 +42,7 @@ UPVOTE_THRESHOLD = int(os.getenv("UPVOTE_THRESHOLD", "10"))
 # --- Пути к файлам ---
 CHATS_FILE = os.path.join("bot_data", "active_chats.json")
 UPVOTES_FILE = os.path.join("bot_data", "upvotes.json")
+SCHEDULE_NOTIFY_STATE_FILE = os.path.join("bot_data", "schedule_notify_state.json")
 
 # --- Администраторы ---
 # Список user_id через запятую, например: "123456789,987654321"

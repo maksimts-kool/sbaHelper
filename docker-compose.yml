@@ -3,13 +3,23 @@ services:
     build: .
     container_name: sbaradio-tts
     restart: unless-stopped
+    volumes:
+      - ./runtime:/app/runtime
     environment:
       AZURACAST_HOST: ${AZURACAST_HOST:-}
       STATION_ID: ${STATION_ID:-2}
       API_KEY: ${API_KEY:-}
       TTS_VOICE: ${TTS_VOICE:-ru-RU-SvetlanaNeural}
       INTRO_FILE_TEXT: ${INTRO_FILE_TEXT:-intro}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      SENTRY_DSN: ${SENTRY_DSN:-}
       PYTHONUNBUFFERED: "1"
+    healthcheck:
+      test: ["CMD", "python", "-m", "monitoring.healthcheck", "--service", "sbaradio-tts", "--max-age", "180"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
 
   sbaradio-bot:
     build: .
@@ -19,6 +29,7 @@ services:
     command: [ "python", "bot.py" ]
     volumes:
       - ./bot_data:/app/bot_data # Сохранение данных аналитики при перезагрузке
+      - ./runtime:/app/runtime
     environment:
       AZURACAST_HOST: ${AZURACAST_HOST:-}
       STATION_ID: ${STATION_ID:-2}
@@ -26,7 +37,15 @@ services:
       TELEGRAM_TOKEN: ${TELEGRAM_TOKEN:-}
       TZ: ${TZ:-Europe/Tallinn}
       ADMIN_IDS: ${ADMIN_IDS:-} # Через запятую: 123456789,987654321
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      SENTRY_DSN: ${SENTRY_DSN:-}
       PYTHONUNBUFFERED: "1"
+    healthcheck:
+      test: ["CMD", "python", "-m", "monitoring.healthcheck", "--service", "sbaradio-bot", "--max-age", "180"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
 
   downloader-bot:
     build: .
@@ -36,10 +55,19 @@ services:
     volumes:
       - /tmp/downloader_videos:/tmp/downloader_videos # временные видео
       - ./cookies:/app/cookies # cookies.txt для TikTok (rw — yt-dlp обновляет токены)
+      - ./runtime:/app/runtime
     environment:
       DOWNLOADER_BOT_TOKEN: ${DOWNLOADER_BOT_TOKEN:-}
       ALLOWED_CHAT_IDS: ${ALLOWED_CHAT_IDS:-} # только эта группа; несколько — через запятую
       MAX_FILE_SIZE_MB: ${MAX_FILE_SIZE_MB:-50} # макс. размер файла для Telegram
       MAX_DURATION_SEC: ${MAX_DURATION_SEC:-300} # макс. длительность (5 мин)
       COOKIES_FILE: ${COOKIES_FILE:-/app/cookies/tiktok.txt}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      SENTRY_DSN: ${SENTRY_DSN:-}
       PYTHONUNBUFFERED: "1"
+    healthcheck:
+      test: ["CMD", "python", "-m", "monitoring.healthcheck", "--service", "downloader-bot", "--max-age", "180"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s

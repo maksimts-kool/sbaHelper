@@ -3,196 +3,232 @@
 """
 import logging
 
-import requests
+import httpx
+from tenacity import retry, retry_if_exception_type, stop_after_attempt, wait_exponential
 
 from core.config import API_HEADERS, AZURACAST_HOST, STATION_ID
 
+logger = logging.getLogger(__name__)
 
-def get_station_data() -> dict | None:
+_CLIENT: httpx.AsyncClient | None = None
+_TIMEOUT = httpx.Timeout(connect=10.0, read=30.0, write=30.0, pool=10.0)
+_RETRYABLE_EXCEPTIONS = (
+    httpx.TimeoutException,
+    httpx.NetworkError,
+    httpx.RemoteProtocolError,
+)
+
+
+async def _get_client() -> httpx.AsyncClient:
+    global _CLIENT
+    if _CLIENT is None or _CLIENT.is_closed:
+        _CLIENT = httpx.AsyncClient(headers=API_HEADERS, timeout=_TIMEOUT)
+    return _CLIENT
+
+
+async def close_api_client() -> None:
+    global _CLIENT
+    if _CLIENT is not None and not _CLIENT.is_closed:
+        await _CLIENT.aclose()
+    _CLIENT = None
+
+
+@retry(
+    stop=stop_after_attempt(3),
+    wait=wait_exponential(multiplier=1, min=1, max=8),
+    retry=retry_if_exception_type(_RETRYABLE_EXCEPTIONS),
+    reraise=True,
+)
+async def _request(method: str, url: str, **kwargs) -> httpx.Response:
+    client = await _get_client()
+    response = await client.request(method, url, **kwargs)
+    response.raise_for_status()
+    return response
+
+
+async def get_station_data() -> dict | None:
     """Получает данные о текущем треке (NowPlaying)."""
+    url = f"{AZURACAST_HOST}/api/nowplaying/{STATION_ID}"
     try:
-        url = f"{AZURACAST_HOST}/api/nowplaying/{STATION_ID}"
-        r = requests.get(url, headers=API_HEADERS, timeout=10)
-        return r.json() if r.status_code == 200 else None
-    except Exception as e:
-        logging.error(f"API Error (NowPlaying): {e}")
-        return None
+        response = await _request("GET", url)
+        return response.json()
+    except httpx.HTTPStatusError as e:
+        logger.warning("API Error (NowPlaying): status=%s", e.response.status_code)
+    except httpx.HTTPError as e:
+        logger.error("API Error (NowPlaying): %s", e)
+    return None
 
 
-def get_queue_data() -> list:
+async def get_queue_data() -> list:
     """Получает список очереди воспроизведения."""
+    url = f"{AZURACAST_HOST}/api/station/{STATION_ID}/queue"
     try:
-        url = f"{AZURACAST_HOST}/api/station/{STATION_ID}/queue"
-        r = requests.get(url, headers=API_HEADERS, timeout=10)
-        return r.json() if r.status_code == 200 else []
-    except Exception as e:
-        logging.error(f"API Error (Queue): {e}")
-        return []
+        response = await _request("GET", url)
+        return response.json()
+    except httpx.HTTPStatusError as e:
+        logger.warning("API Error (Queue): status=%s", e.response.status_code)
+    except httpx.HTTPError as e:
+        logger.error("API Error (Queue): %s", e)
+    return []
 
 
-def skip_song_api() -> tuple[bool, str]:
+async def skip_song_api() -> tuple[bool, str]:
     """Отправляет команду пропустить текущий трек."""
+    url = f"{AZURACAST_HOST}/api/station/{STATION_ID}/backend/skip"
     try:
-        url = f"{AZURACAST_HOST}/api/station/{STATION_ID}/backend/skip"
-        r = requests.post(url, headers=API_HEADERS, timeout=10)
-        return (True, "Skipped") if r.status_code == 200 else (False, f"Error {r.status_code}")
-    except Exception as e:
+        await _request("POST", url)
+        return True, "Skipped"
+    except httpx.HTTPStatusError as e:
+        return False, f"Error {e.response.status_code}"
+    except httpx.HTTPError as e:
+        logger.error("API Error (Skip): %s", e)
         return False, str(e)
 
 
-def get_playlist_info(playlist_id: int) -> dict | None:
+async def get_playlist_info(playlist_id: int) -> dict | None:
     """Получает информацию о плейлисте по ID."""
+    url = f"{AZURACAST_HOST}/api/station/{STATION_ID}/playlist/{playlist_id}"
     try:
-        url = f"{AZURACAST_HOST}/api/station/{STATION_ID}/playlist/{playlist_id}"
-        r = requests.get(url, headers=API_HEADERS, timeout=10)
-        return r.json() if r.status_code == 200 else None
-    except Exception as e:
-        logging.error(f"API Error (Playlist Info): {e}")
-        return None
+        response = await _request("GET", url)
+        return response.json()
+    except httpx.HTTPStatusError as e:
+        logger.warning("API Error (Playlist Info): id=%s status=%s", playlist_id, e.response.status_code)
+    except httpx.HTTPError as e:
+        logger.error("API Error (Playlist Info): %s", e)
+    return None
 
 
-def get_playlist_songs(playlist_id: int) -> list:
+async def get_playlist_songs(playlist_id: int) -> list:
     """Получает список треков плейлиста, фильтруя все медиафайлы станции."""
+    url = f"{AZURACAST_HOST}/api/station/{STATION_ID}/files"
     try:
-        url = f"{AZURACAST_HOST}/api/station/{STATION_ID}/files"
-        r = requests.get(url, headers=API_HEADERS, timeout=30)
-        if r.status_code != 200:
-            return []
-        all_files = r.json()
+        response = await _request("GET", url)
+        all_files = response.json()
         songs = []
-        for f in all_files:
-            playlists = f.get('playlists', [])
+        for file_entry in all_files:
+            playlists = file_entry.get('playlists', [])
             if isinstance(playlists, list):
-                for pl in playlists:
-                    if isinstance(pl, dict) and pl.get('id') == playlist_id:
-                        songs.append(f)
+                for playlist in playlists:
+                    if isinstance(playlist, dict) and playlist.get('id') == playlist_id:
+                        songs.append(file_entry)
                         break
-                    elif isinstance(pl, int) and pl == playlist_id:
-                        songs.append(f)
+                    if isinstance(playlist, int) and playlist == playlist_id:
+                        songs.append(file_entry)
                         break
-        # Sort by artist+title for consistent ordering
         songs.sort(key=lambda x: (x.get('artist', '') + x.get('title', '')).lower())
         return songs
-    except Exception as e:
-        logging.error(f"API Error (Playlist Songs): {e}")
-        return []
+    except httpx.HTTPStatusError as e:
+        logger.warning("API Error (Playlist Songs): playlist_id=%s status=%s", playlist_id, e.response.status_code)
+    except httpx.HTTPError as e:
+        logger.error("API Error (Playlist Songs): %s", e)
+    return []
 
 
-def find_media_file(song_unique_id: str, artist: str = '', title: str = '') -> dict | None:
+async def find_media_file(song_unique_id: str, artist: str = '', title: str = '') -> dict | None:
     """
     Ищет медиафайл на станции по song_id (32-символьный хеш из NowPlaying song.id).
     Если не найдено — пробует match по artist+title.
     Возвращает dict файла или None.
     """
+    url = f"{AZURACAST_HOST}/api/station/{STATION_ID}/files"
     try:
-        url = f"{AZURACAST_HOST}/api/station/{STATION_ID}/files"
-        r = requests.get(url, headers=API_HEADERS, timeout=30)
-        if r.status_code != 200:
-            return None
-        all_files = r.json()
+        response = await _request("GET", url)
+        all_files = response.json()
 
-        # 1. Точное совпадение по song_id (32-char hash, совпадает с song.id в NowPlaying)
-        for f in all_files:
-            if f.get('song_id') == song_unique_id:
-                return f
+        for file_entry in all_files:
+            if file_entry.get('song_id') == song_unique_id:
+                return file_entry
 
-        # 2. Резервный поиск по artist + title
         if artist and title:
-            a_low = artist.strip().lower()
-            t_low = title.strip().lower()
-            for f in all_files:
-                if f.get('artist', '').strip().lower() == a_low and \
-                   f.get('title', '').strip().lower() == t_low:
-                    return f
+            artist_lower = artist.strip().lower()
+            title_lower = title.strip().lower()
+            for file_entry in all_files:
+                if file_entry.get('artist', '').strip().lower() == artist_lower and \
+                   file_entry.get('title', '').strip().lower() == title_lower:
+                    return file_entry
+    except httpx.HTTPStatusError as e:
+        logger.warning("API Error (find_media_file): status=%s", e.response.status_code)
+    except httpx.HTTPError as e:
+        logger.error("API Error (find_media_file): %s", e)
+    return None
 
-        return None
-    except Exception as e:
-        logging.error(f"API Error (find_media_file): {e}")
-        return None
 
-
-def add_media_to_playlist(media_id: int, playlist_id: int) -> tuple[bool, str]:
+async def add_media_to_playlist(media_id: int, playlist_id: int) -> tuple[bool, str]:
     """
     Добавляет медиафайл (по числовому id) в плейлист через AzuraCast API.
     Получает текущие данные файла, добавляет playlist_id в список playlists и
     сохраняет обратно через PUT.
     """
+    get_url = f"{AZURACAST_HOST}/api/station/{STATION_ID}/file/{media_id}"
+    put_url = get_url
     try:
-        # Получаем текущие данные файла
-        get_url = f"{AZURACAST_HOST}/api/station/{STATION_ID}/file/{media_id}"
-        r = requests.get(get_url, headers=API_HEADERS, timeout=10)
-        if r.status_code != 200:
-            return False, f"GET file error {r.status_code}"
+        response = await _request("GET", get_url)
+        file_data = response.json()
 
-        file_data = r.json()
-
-        # Проверяем, не добавлен ли уже плейлист
         playlists = file_data.get('playlists', [])
         existing_ids = set()
-        for p in playlists:
-            if isinstance(p, dict):
-                existing_ids.add(p.get('id'))
-            elif isinstance(p, int):
-                existing_ids.add(p)
+        for playlist in playlists:
+            if isinstance(playlist, dict):
+                existing_ids.add(playlist.get('id'))
+            elif isinstance(playlist, int):
+                existing_ids.add(playlist)
 
         if playlist_id in existing_ids:
             return True, "already_in_playlist"
 
-        # Добавляем новый плейлист
         playlists.append({"id": playlist_id})
         file_data['playlists'] = playlists
 
-        # AzuraCast требует float для числовых полей длительности/позиций
         for float_field in ('length', 'amplify', 'fade_overlap', 'fade_in', 'fade_out', 'cue_in', 'cue_out'):
             if float_field in file_data and file_data[float_field] is not None:
                 file_data[float_field] = float(file_data[float_field])
 
-        put_url = f"{AZURACAST_HOST}/api/station/{STATION_ID}/file/{media_id}"
-        r2 = requests.put(put_url, headers=API_HEADERS, json=file_data, timeout=10)
-        if r2.status_code in (200, 201):
-            return True, "added"
-        return False, f"PUT error {r2.status_code}: {r2.text[:200]}"
-    except Exception as e:
-        logging.error(f"API Error (add_media_to_playlist): {e}")
+        await _request("PUT", put_url, json=file_data)
+        return True, "added"
+    except httpx.HTTPStatusError as e:
+        logger.error("API Error (add_media_to_playlist): media_id=%s status=%s", media_id, e.response.status_code)
+        return False, f"HTTP {e.response.status_code}"
+    except httpx.HTTPError as e:
+        logger.error("API Error (add_media_to_playlist): %s", e)
         return False, str(e)
 
 
-def is_media_in_playlist(song_unique_id: str, playlist_id: int) -> bool:
+async def is_media_in_playlist(song_unique_id: str, playlist_id: int) -> bool:
     """Проверяет, находится ли трек (по song_id хешу из NowPlaying) в указанном плейлисте."""
-    media = find_media_file(song_unique_id)
+    media = await find_media_file(song_unique_id)
     if not media:
         return False
     playlists = media.get('playlists', [])
-    for p in playlists:
-        if isinstance(p, dict) and p.get('id') == playlist_id:
+    for playlist in playlists:
+        if isinstance(playlist, dict) and playlist.get('id') == playlist_id:
             return True
-        if isinstance(p, int) and p == playlist_id:
+        if isinstance(playlist, int) and playlist == playlist_id:
             return True
     return False
 
 
-def get_schedule(rows: int = 48) -> list:
+async def get_schedule(rows: int = 48) -> list:
     """Получает расписание станции (текущие и ближайшие события)."""
+    url = f"{AZURACAST_HOST}/api/station/{STATION_ID}/schedule"
     try:
-        url = f"{AZURACAST_HOST}/api/station/{STATION_ID}/schedule"
-        r = requests.get(url, params={"rows": rows}, timeout=10)
-        return r.json() if r.status_code == 200 else []
-    except Exception as e:
-        logging.error(f"API Error (Schedule): {e}")
-        return []
+        response = await _request("GET", url, params={"rows": rows})
+        return response.json()
+    except httpx.HTTPStatusError as e:
+        logger.warning("API Error (Schedule): status=%s", e.response.status_code)
+    except httpx.HTTPError as e:
+        logger.error("API Error (Schedule): %s", e)
+    return []
 
 
-def get_station_history(limit: int = 5) -> list:
+async def get_station_history(limit: int = 5) -> list:
     """
     Возвращает последние `limit` сыгранных треков через API истории.
     Каждый элемент: {'song_id': str, 'display_title': str, 'artist': str, 'title': str}
     """
+    url = f"{AZURACAST_HOST}/api/station/{STATION_ID}/history"
     try:
-        url = f"{AZURACAST_HOST}/api/station/{STATION_ID}/history"
-        r = requests.get(url, headers=API_HEADERS, timeout=10)
-        if r.status_code != 200:
-            return []
-        history = r.json()
+        response = await _request("GET", url)
+        history = response.json()
         result = []
         seen = set()
         for entry in history:
@@ -205,6 +241,7 @@ def get_station_history(limit: int = 5) -> list:
             title = song.get('title', '')
             text = song.get('text', '')
             from bot.formatters import clean_track_info
+
             display_title = clean_track_info(artist, title, text)
             result.append({
                 'song_id': song_id,
@@ -215,6 +252,8 @@ def get_station_history(limit: int = 5) -> list:
             if len(result) >= limit:
                 break
         return result
-    except Exception as e:
-        logging.error(f"API Error (get_station_history): {e}")
-        return []
+    except httpx.HTTPStatusError as e:
+        logger.warning("API Error (get_station_history): status=%s", e.response.status_code)
+    except httpx.HTTPError as e:
+        logger.error("API Error (get_station_history): %s", e)
+    return []

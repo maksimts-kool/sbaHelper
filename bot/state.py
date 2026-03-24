@@ -12,7 +12,7 @@ from datetime import datetime
 
 import pytz
 
-from core.config import CHATS_FILE, TZ_NAME, UPVOTES_FILE
+from core.config import CHATS_FILE, SCHEDULE_NOTIFY_STATE_FILE, TZ_NAME, UPVOTES_FILE
 
 # --- ГОЛОСОВАНИЕ ---
 VOTE_STATE: dict = {
@@ -43,6 +43,53 @@ def save_chats(data: dict) -> None:
             json.dump(data, f)
     except Exception as e:
         logging.error(f"Error saving chats file: {e}")
+
+
+def _ensure_parent_dir(path: str) -> None:
+    parent = os.path.dirname(path)
+    if parent:
+        os.makedirs(parent, exist_ok=True)
+
+
+def _normalize_schedule_keys(raw_keys) -> set[tuple[int, int]]:
+    keys: set[tuple[int, int]] = set()
+    if not isinstance(raw_keys, list):
+        return keys
+
+    for item in raw_keys:
+        if not isinstance(item, (list, tuple)) or len(item) != 2:
+            continue
+        try:
+            keys.add((int(item[0]), int(item[1])))
+        except (TypeError, ValueError):
+            continue
+
+    return keys
+
+
+def load_schedule_notify_state() -> dict[str, set[tuple[int, int]]]:
+    if os.path.exists(SCHEDULE_NOTIFY_STATE_FILE):
+        try:
+            with open(SCHEDULE_NOTIFY_STATE_FILE, 'r') as f:
+                data = json.load(f)
+            return {
+                'active_keys': _normalize_schedule_keys(data.get('active_keys', [])),
+            }
+        except Exception as e:
+            logging.error(f"Error loading schedule notify state: {e}")
+    return {'active_keys': set()}
+
+
+def save_schedule_notify_state(active_keys: set[tuple[int, int]]) -> None:
+    try:
+        _ensure_parent_dir(SCHEDULE_NOTIFY_STATE_FILE)
+        payload = {
+            'active_keys': [list(item) for item in sorted(active_keys)],
+        }
+        with open(SCHEDULE_NOTIFY_STATE_FILE, 'w') as f:
+            json.dump(payload, f, indent=2)
+    except Exception as e:
+        logging.error(f"Error saving schedule notify state: {e}")
 
 
 CHATS_DB: dict = load_chats()

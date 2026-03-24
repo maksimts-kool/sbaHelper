@@ -1,3 +1,4 @@
+import logging
 import os
 import time
 import tempfile
@@ -6,6 +7,8 @@ from collections import OrderedDict
 
 from core.config import SCHEDULE_PLAYLIST_ID
 from services.playlist_names import PLAYLIST_NAMES
+
+logger = logging.getLogger(__name__)
 
 _intro_was_in_queue = False
 
@@ -80,17 +83,17 @@ def run(api, tts, queue, intro_text):
     )
 
     if _intro_was_in_queue and not intro_in_queue:
-        print(f"[{datetime.now().strftime('%H:%M:%S')}] [PlaylistService] Intro finished. Generating schedule announcement...")
+        logger.info("[%s] [PlaylistService] Intro finished. Generating schedule announcement...", datetime.now().strftime('%H:%M:%S'))
 
         try:
             schedules = api.get_schedules()
             if not schedules:
-                print("[PlaylistService] No schedule data.")
+                logger.warning("[PlaylistService] No schedule data.")
                 _intro_was_in_queue = intro_in_queue
                 return
 
             text = _build_next5_text(schedules) or "Далее на радио отличная музыка."
-            print(f"[PlaylistService] TTS text: {text}")
+            logger.info("[PlaylistService] TTS text: %s", text)
 
             with tempfile.TemporaryDirectory() as td:
                 fpath = os.path.join(td, "next5.mp3")
@@ -100,11 +103,9 @@ def run(api, tts, queue, intro_text):
                 if file_id:
                     api.set_file_playlist(file_id, SCHEDULE_PLAYLIST_ID)
 
-            print("[PlaylistService] tts_next5.mp3 updated successfully.")
+            logger.info("[PlaylistService] tts_next5.mp3 updated successfully.")
 
         except Exception as e:
-            print(f"[PlaylistService] Error: {e}")
-            import traceback
-            traceback.print_exc()
+            logger.exception("[PlaylistService] Error: %s", e)
 
     _intro_was_in_queue = intro_in_queue
