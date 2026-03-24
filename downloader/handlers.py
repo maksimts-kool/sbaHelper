@@ -5,6 +5,7 @@
 import asyncio
 import logging
 import os
+import re
 
 from telegram import Message, Update
 from telegram.constants import ChatAction
@@ -25,9 +26,9 @@ from downloader.core import (
 
 logger = logging.getLogger(__name__)
 
-INFO_EMOJI = '<tg-emoji emoji-id="5231012545799666522"></tg-emoji>'
-DOWNLOAD_EMOJI = '<tg-emoji emoji-id="5386367538735104399"></tg-emoji>'
-SEND_VIDEO_EMOJI = '<tg-emoji emoji-id="5201691993775818138"></tg-emoji>'
+INFO_EMOJI = "![ℹ️](tg://emoji?id=5231012545799666522)"
+DOWNLOAD_EMOJI = "![⬇️](tg://emoji?id=5386367538735104399)"
+SEND_VIDEO_EMOJI = "![📤](tg://emoji?id=5201691993775818138)"
 
 
 # --------------------------------------------------------------------------- #
@@ -48,10 +49,22 @@ def _format_duration(seconds: int) -> str:
     return f"{m}:{s:02d}"
 
 
+def _escape_md_v2(text: str) -> str:
+    return re.sub(r"([_\*\[\]\(\)~`>#+\-=|{}.!])", r"\\\1", text)
+
+
+def _build_status_text(title: str, uploader: str, duration_str: str, status_line: str) -> str:
+    return (
+        f"📹 *{_escape_md_v2(title)}*\n"
+        f"👤 {_escape_md_v2(uploader)}{_escape_md_v2(duration_str)}\n\n"
+        f"{status_line}"
+    )
+
+
 async def _safe_edit(msg: Message, text: str) -> None:
     """Редактирует сообщение, молча игнорируя ошибку 'message not modified'."""
     try:
-        await msg.edit_text(text, parse_mode="HTML")
+        await msg.edit_text(text, parse_mode="MarkdownV2")
     except TelegramError as e:
         if "message is not modified" not in str(e).lower():
             logger.warning("edit_text error: %s", e)
@@ -91,8 +104,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
     # --- 1. Получаем информацию ---
     status_msg = await message.reply_text(
-        f"{INFO_EMOJI} Получаю информацию о видео...",
-        parse_mode="HTML",
+        f"{INFO_EMOJI} Получаю информацию о видео\.\.\.",
+        parse_mode="MarkdownV2",
     )
 
     loop = asyncio.get_running_loop()
@@ -102,26 +115,32 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             None, fetch_info, url
         )
     except UnsupportedContentError as e:
-        await _safe_edit(status_msg, f"🚫 {e}")
+        await _safe_edit(status_msg, f"🚫 {_escape_md_v2(str(e))}")
         return
     except VideoTooLongError as e:
-        await _safe_edit(status_msg, f"⏱ {e}")
+        await _safe_edit(status_msg, f"⏱ {_escape_md_v2(str(e))}")
         return
     except DownloadError as e:
         short_err = str(e)[:200]
-        await _safe_edit(status_msg, f"❌ Не удалось получить информацию:\n<code>{short_err}</code>")
+        await _safe_edit(
+            status_msg,
+            f"❌ Не удалось получить информацию:\n`{_escape_md_v2(short_err)}`",
+        )
         return
     except Exception as e:
         logger.exception("Unexpected error in fetch_info")
-        await _safe_edit(status_msg, "❌ Неизвестная ошибка при получении информации.")
+        await _safe_edit(status_msg, "❌ Неизвестная ошибка при получении информации\.")
         return
 
     duration_str = f" · {_format_duration(info.duration)}" if info.duration else ""
     await _safe_edit(
         status_msg,
-        f"📹 <b>{info.title}</b>\n"
-        f"👤 {info.uploader}{duration_str}\n\n"
-        f"{DOWNLOAD_EMOJI} Скачиваю видео...",
+        _build_status_text(
+            info.title,
+            info.uploader,
+            duration_str,
+            f"{DOWNLOAD_EMOJI} Скачиваю видео\.\.\.",
+        ),
     )
     await context.bot.send_chat_action(chat_id=chat_id, action=ChatAction.UPLOAD_VIDEO)
 
@@ -142,9 +161,12 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             asyncio.run_coroutine_threadsafe(
                 _safe_edit(
                     status_msg,
-                    f"📹 <b>{info.title}</b>\n"
-                    f"👤 {info.uploader}{duration_str}\n\n"
-                    f"{DOWNLOAD_EMOJI} Скачиваю: [{bar}] {rounded}%",
+                    _build_status_text(
+                        info.title,
+                        info.uploader,
+                        duration_str,
+                        f"{DOWNLOAD_EMOJI} Скачиваю: \[{bar}\] {rounded}%",
+                    ),
                 ),
                 loop,
             )
@@ -155,20 +177,20 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         )
     except VideoTooLongError as e:
         logger.warning("[%s] Video too long at download stage: %s", chat_label, url)
-        await _safe_edit(status_msg, f"⏱ {e}")
+        await _safe_edit(status_msg, f"⏱ {_escape_md_v2(str(e))}")
         return
     except FileTooLargeError as e:
         logger.warning("[%s] File too large: %s", chat_label, url)
-        await _safe_edit(status_msg, f"📦 {e}")
+        await _safe_edit(status_msg, f"📦 {_escape_md_v2(str(e))}")
         return
     except DownloadError as e:
         logger.error("[%s] Download failed for %s: %s", chat_label, url, e)
         short_err = str(e)[:200]
-        await _safe_edit(status_msg, f"❌ Ошибка загрузки:\n<code>{short_err}</code>")
+        await _safe_edit(status_msg, f"❌ Ошибка загрузки:\n`{_escape_md_v2(short_err)}`")
         return
     except Exception:
         logger.exception("[%s] Unexpected error in download_video for %s", chat_label, url)
-        await _safe_edit(status_msg, "❌ Неизвестная ошибка при скачивании.")
+        await _safe_edit(status_msg, "❌ Неизвестная ошибка при скачивании\.")
         return
 
     logger.info("[%s] Download complete: %s", chat_label, result.file_path)
@@ -177,9 +199,12 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     logger.info("[%s] Sending video to chat...", chat_label)
     await _safe_edit(
         status_msg,
-        f"📹 <b>{info.title}</b>\n"
-        f"👤 {info.uploader}{duration_str}\n\n"
-        f"{SEND_VIDEO_EMOJI} Отправляю видео...",
+        _build_status_text(
+            info.title,
+            info.uploader,
+            duration_str,
+            f"{SEND_VIDEO_EMOJI} Отправляю видео\.\.\.",
+        ),
     )
     await context.bot.send_chat_action(chat_id=chat_id, action=ChatAction.UPLOAD_VIDEO)
 
@@ -199,7 +224,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             )
     except TelegramError as e:
         logger.error("[%s] Failed to send video: %s", chat_label, e)
-        await _safe_edit(status_msg, f"❌ Не удалось отправить видео: {e}")
+        await _safe_edit(status_msg, f"❌ Не удалось отправить видео: {_escape_md_v2(str(e))}")
         return
     else:
         logger.info("[%s] Video sent successfully to %s", chat_label, user_label)
