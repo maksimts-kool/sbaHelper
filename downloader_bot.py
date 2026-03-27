@@ -62,11 +62,16 @@ if __name__ == "__main__":
         logger.error("Unhandled downloader bot error", exc_info=exc_info)
         monitor.fail("telegram error", error=str(context.error))
 
+    # `run_polling()` overrides request-level `get_updates()` timeouts unless they
+    # are passed explicitly. Keep polling settings aligned to avoid spurious
+    # `httpx.ReadError` during normal long-poll waits or brief network glitches.
+    polling_timeout = 30
     request = HTTPXRequest(
         connection_pool_size=8,
-        read_timeout=60.0,   # видео могут грузиться долго
+        read_timeout=float(polling_timeout + 15),
         write_timeout=60.0,
         connect_timeout=20.0,
+        pool_timeout=20.0,
     )
 
     application = (
@@ -106,4 +111,12 @@ if __name__ == "__main__":
         job_kwargs={'misfire_grace_time': 30, 'max_instances': 1},
     )
 
-    application.run_polling(drop_pending_updates=True)
+    application.run_polling(
+        timeout=polling_timeout,
+        read_timeout=float(polling_timeout + 15),
+        write_timeout=60.0,
+        connect_timeout=20.0,
+        pool_timeout=20.0,
+        bootstrap_retries=-1,
+        drop_pending_updates=True,
+    )

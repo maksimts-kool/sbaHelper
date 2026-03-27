@@ -67,11 +67,17 @@ if __name__ == "__main__":
         logger.error("Unhandled telegram bot error", exc_info=exc_info)
         monitor.fail("telegram error", error=str(context.error), active_chats=len(CHATS_DB))
 
+    # `Application.run_polling()` has its own timeout defaults for `get_updates()`.
+    # If not passed explicitly, PTB uses a very small `read_timeout=2`, which
+    # overrides request-level settings during long polling and makes transient
+    # network hiccups much more likely to surface as `httpx.ReadError`.
+    polling_timeout = 30
     request = HTTPXRequest(
         connection_pool_size=10,
-        read_timeout=20.0,
+        read_timeout=float(polling_timeout + 15),
         write_timeout=20.0,
         connect_timeout=20.0,
+        pool_timeout=20.0,
     )
 
     application = (
@@ -116,4 +122,11 @@ if __name__ == "__main__":
     )
 
     print("Bot started (Optimized for timeouts)...")
-    application.run_polling()
+    application.run_polling(
+        timeout=polling_timeout,
+        read_timeout=float(polling_timeout + 15),
+        write_timeout=20.0,
+        connect_timeout=20.0,
+        pool_timeout=20.0,
+        bootstrap_retries=-1,
+    )
