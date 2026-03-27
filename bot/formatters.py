@@ -125,8 +125,9 @@ def format_main_message(data: dict) -> tuple[str, str, int, str]:
 
     elapsed = np.get('elapsed', 0)
     duration = np.get('duration', 0)
-    playlist_raw = np.get('playlist', 'General')
-    playlist = escape_md_v2(PLAYLIST_NAMES.get(playlist_raw.lower(), playlist_raw))
+    playlist_raw = np.get('playlist') or 'General'
+    playlist_text = str(playlist_raw)
+    playlist = escape_md_v2(PLAYLIST_NAMES.get(playlist_text.lower(), playlist_text))
 
     is_request = np.get('is_request') or str(playlist_raw).lower() == 'requested'
     req_mark = "🎷 *Заказ\\!* " if is_request else ""
@@ -178,7 +179,12 @@ def format_queue_list(queue_data: list, schedule: list | None = None) -> str:
             first = active[0]
             end_ts = first.get('end_timestamp', 0)
             names = ", ".join(
-                escape_md(PLAYLIST_NAMES.get(item.get('name', '').lower(), item.get('name', '')))
+                escape_md(
+                    PLAYLIST_NAMES.get(
+                        str(item.get('name') or '').lower(),
+                        str(item.get('name') or ''),
+                    )
+                )
                 for item in active
             )
             end_str = _fmt_sched_time(end_ts) if end_ts else "?"
@@ -209,8 +215,9 @@ def format_queue_list(queue_data: list, schedule: list | None = None) -> str:
         clean_text = clean_track_info(raw_artist, raw_title, raw_text)
         text_md = escape_md(clean_text)
 
-        playlist_raw = item.get('playlist', '')
-        playlist_md = escape_md(PLAYLIST_NAMES.get(playlist_raw.lower(), playlist_raw))
+        playlist_raw = item.get('playlist') or ''
+        playlist_text = str(playlist_raw)
+        playlist_md = escape_md(PLAYLIST_NAMES.get(playlist_text.lower(), playlist_text))
 
         played_at = item.get('played_at', 0)
         duration = item.get('duration', 0)
@@ -447,7 +454,15 @@ def format_schedule_started(
     first     = started_items[0]
     start_ts  = first.get('start_timestamp', 0)
     end_ts    = first.get('end_timestamp', 0)
-    names     = [escape_md(PLAYLIST_NAMES.get(item.get('name', '').lower(), item.get('name', '?'))) for item in started_items]
+    names     = [
+        escape_md(
+            PLAYLIST_NAMES.get(
+                str(item.get('name') or '').lower(),
+                str(item.get('name') or '?'),
+            )
+        )
+        for item in started_items
+    ]
     playlists = ", ".join(names)
     time_range = (
         f"{_fmt_sched_time(start_ts)} – {_fmt_sched_time(end_ts)}"
@@ -491,10 +506,26 @@ def format_schedule_ended(
         f"{_fmt_sched_time(start_ts)} – {_fmt_sched_time(end_ts)}"
         if start_ts and end_ts else "?"
     )
-    names = ", ".join(escape_md(PLAYLIST_NAMES.get(item.get('name', '').lower(), item.get('name', '?'))) for item in ended_items)
+    names = ", ".join(
+        escape_md(
+            PLAYLIST_NAMES.get(
+                str(item.get('name') or '').lower(),
+                str(item.get('name') or '?'),
+            )
+        )
+        for item in ended_items
+    )
 
     if still_active:
-        active_names = ", ".join(escape_md(PLAYLIST_NAMES.get(item.get('name', '').lower(), item.get('name', '?'))) for item in still_active)
+        active_names = ", ".join(
+            escape_md(
+                PLAYLIST_NAMES.get(
+                    str(item.get('name') or '').lower(),
+                    str(item.get('name') or '?'),
+                )
+            )
+            for item in still_active
+        )
         return (
             f"✅ Блок песен *{time_range}* закончился\n"
             f"📋 Для: {names}\n"
@@ -507,7 +538,15 @@ def format_schedule_ended(
         n_end   = n.get('end_timestamp', 0)
         n_start_fmt = _fmt_sched_time(n_start) if n_start else "?"
         n_end_fmt   = _fmt_sched_time(n_end)   if n_end   else "?"
-        n_names = ", ".join(escape_md(PLAYLIST_NAMES.get(item.get('name', '').lower(), item.get('name', '?'))) for item in next_items)
+        n_names = ", ".join(
+            escape_md(
+                PLAYLIST_NAMES.get(
+                    str(item.get('name') or '').lower(),
+                    str(item.get('name') or '?'),
+                )
+            )
+            for item in next_items
+        )
         now_ts = int(time_module.time())
         if n_start and _sched_same_day(now_ts, n_start):
             next_str = f"в *{n_start_fmt} – {n_end_fmt}*"
