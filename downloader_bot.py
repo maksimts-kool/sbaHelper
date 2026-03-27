@@ -62,11 +62,18 @@ if __name__ == "__main__":
         logger.error("Unhandled downloader bot error", exc_info=exc_info)
         monitor.fail("telegram error", error=str(context.error))
 
-    # `run_polling()` overrides request-level `get_updates()` timeouts unless they
-    # are passed explicitly. Keep polling settings aligned to avoid spurious
-    # `httpx.ReadError` during normal long-poll waits or brief network glitches.
+    # Use a dedicated request object for long-poll `get_updates()` so the polling
+    # timeout fix works across PTB versions without depending on extra
+    # `run_polling()` keyword arguments.
     polling_timeout = 30
     request = HTTPXRequest(
+        connection_pool_size=8,
+        read_timeout=60.0,
+        write_timeout=60.0,
+        connect_timeout=20.0,
+        pool_timeout=20.0,
+    )
+    polling_request = HTTPXRequest(
         connection_pool_size=8,
         read_timeout=float(polling_timeout + 15),
         write_timeout=60.0,
@@ -78,6 +85,7 @@ if __name__ == "__main__":
         ApplicationBuilder()
         .token(DOWNLOADER_BOT_TOKEN)
         .request(request)
+        .get_updates_request(polling_request)
         .post_init(post_init)
         .post_shutdown(post_shutdown)
         .build()
@@ -113,10 +121,6 @@ if __name__ == "__main__":
 
     application.run_polling(
         timeout=polling_timeout,
-        read_timeout=float(polling_timeout + 15),
-        write_timeout=60.0,
-        connect_timeout=20.0,
-        pool_timeout=20.0,
         bootstrap_retries=-1,
         drop_pending_updates=True,
     )
