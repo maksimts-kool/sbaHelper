@@ -9,6 +9,11 @@ AZURACAST_HOST = os.getenv("AZURACAST_HOST", "https://radio.maksimtsikvasvili24.
 STATION_ID = int(os.getenv("STATION_ID", "2"))
 API_KEY = os.getenv("API_KEY", "")
 API_HEADERS = {"Authorization": f"Bearer {API_KEY}"}
+API_CONNECT_TIMEOUT = float(os.getenv("API_CONNECT_TIMEOUT", "20"))
+API_READ_TIMEOUT = float(os.getenv("API_READ_TIMEOUT", "30"))
+API_WRITE_TIMEOUT = float(os.getenv("API_WRITE_TIMEOUT", "30"))
+API_POOL_TIMEOUT = float(os.getenv("API_POOL_TIMEOUT", "20"))
+API_RETRY_ATTEMPTS = int(os.getenv("API_RETRY_ATTEMPTS", "4"))
 
 # --- Telegram Bot ---
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")

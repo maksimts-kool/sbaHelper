@@ -1,9 +1,23 @@
 import logging
 
 import httpx
-from tenacity import retry, retry_if_exception_type, stop_after_attempt, wait_exponential
+from tenacity import before_sleep_log, retry, retry_if_exception_type, stop_after_attempt, wait_exponential
+
+from core.config import (
+    API_CONNECT_TIMEOUT,
+    API_POOL_TIMEOUT,
+    API_READ_TIMEOUT,
+    API_RETRY_ATTEMPTS,
+    API_WRITE_TIMEOUT,
+)
 
 logger = logging.getLogger(__name__)
+
+RETRYABLE_EXCEPTIONS = (
+    httpx.TimeoutException,
+    httpx.NetworkError,
+    httpx.RemoteProtocolError,
+)
 
 
 class AzuraClient:
@@ -11,24 +25,45 @@ class AzuraClient:
         self.host = host
         self.headers = {"Authorization": f"Bearer {api_key}"}
         self.station_id = station_id
-        self.client = httpx.Client(
+        self.client = self._build_client()
+
+    def _build_client(self):
+        return httpx.Client(
             headers=self.headers,
-            timeout=httpx.Timeout(connect=10.0, read=30.0, write=30.0, pool=10.0),
+            timeout=httpx.Timeout(
+                connect=API_CONNECT_TIMEOUT,
+                read=API_READ_TIMEOUT,
+                write=API_WRITE_TIMEOUT,
+                pool=API_POOL_TIMEOUT,
+            ),
         )
+
+    def _reset_client(self):
+        try:
+            self.client.close()
+        except Exception:
+            logger.debug("[API] Failed to close stale HTTP client", exc_info=True)
+        self.client = self._build_client()
 
     def close(self):
         self.client.close()
 
     @retry(
-        stop=stop_after_attempt(3),
+        stop=stop_after_attempt(API_RETRY_ATTEMPTS),
         wait=wait_exponential(multiplier=1, min=1, max=8),
-        retry=retry_if_exception_type((httpx.TimeoutException, httpx.NetworkError, httpx.RemoteProtocolError)),
+        retry=retry_if_exception_type(RETRYABLE_EXCEPTIONS),
+        before_sleep=before_sleep_log(logger, logging.WARNING),
         reraise=True,
     )
     def _request(self, method, url, **kwargs):
-        response = self.client.request(method, url, **kwargs)
-        response.raise_for_status()
-        return response
+        try:
+            response = self.client.request(method, url, **kwargs)
+            response.raise_for_status()
+            return response
+        except RETRYABLE_EXCEPTIONS as exc:
+            logger.warning("[API] Retrying %s %s after transport error: %s", method, url, exc)
+            self._reset_client()
+            raise
 
     def get_queue(self):
         url = f"{self.host}/station/{self.station_id}/queue"

@@ -4,14 +4,28 @@
 import logging
 
 import httpx
-from tenacity import retry, retry_if_exception_type, stop_after_attempt, wait_exponential
+from tenacity import before_sleep_log, retry, retry_if_exception_type, stop_after_attempt, wait_exponential
 
-from core.config import API_HEADERS, AZURACAST_HOST, STATION_ID
+from core.config import (
+    API_CONNECT_TIMEOUT,
+    API_HEADERS,
+    API_POOL_TIMEOUT,
+    API_READ_TIMEOUT,
+    API_RETRY_ATTEMPTS,
+    API_WRITE_TIMEOUT,
+    AZURACAST_HOST,
+    STATION_ID,
+)
 
 logger = logging.getLogger(__name__)
 
 _CLIENT: httpx.AsyncClient | None = None
-_TIMEOUT = httpx.Timeout(connect=10.0, read=30.0, write=30.0, pool=10.0)
+_TIMEOUT = httpx.Timeout(
+    connect=API_CONNECT_TIMEOUT,
+    read=API_READ_TIMEOUT,
+    write=API_WRITE_TIMEOUT,
+    pool=API_POOL_TIMEOUT,
+)
 _RETRYABLE_EXCEPTIONS = (
     httpx.TimeoutException,
     httpx.NetworkError,
@@ -33,17 +47,28 @@ async def close_api_client() -> None:
     _CLIENT = None
 
 
+async def _reset_client() -> httpx.AsyncClient:
+    await close_api_client()
+    return await _get_client()
+
+
 @retry(
-    stop=stop_after_attempt(3),
+    stop=stop_after_attempt(API_RETRY_ATTEMPTS),
     wait=wait_exponential(multiplier=1, min=1, max=8),
     retry=retry_if_exception_type(_RETRYABLE_EXCEPTIONS),
+    before_sleep=before_sleep_log(logger, logging.WARNING),
     reraise=True,
 )
 async def _request(method: str, url: str, **kwargs) -> httpx.Response:
     client = await _get_client()
-    response = await client.request(method, url, **kwargs)
-    response.raise_for_status()
-    return response
+    try:
+        response = await client.request(method, url, **kwargs)
+        response.raise_for_status()
+        return response
+    except _RETRYABLE_EXCEPTIONS as e:
+        logger.warning("API transport error for %s %s: %s", method, url, e)
+        await _reset_client()
+        raise
 
 
 async def get_station_data() -> dict | None:
