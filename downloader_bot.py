@@ -13,6 +13,7 @@ from downloader.handlers import handle_message
 from monitoring.logging_utils import configure_logging
 from monitoring.runtime import HeartbeatMonitor
 from monitoring.sentry import init_sentry
+from monitoring.telegram_errors import is_transient_telegram_error
 
 configure_logging("downloader-bot")
 init_sentry("downloader-bot")
@@ -56,6 +57,10 @@ if __name__ == "__main__":
         monitor.beat(status="running", allowed_chats=len(ALLOWED_CHAT_IDS))
 
     async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
+        if is_transient_telegram_error(context.error):
+            logger.warning("Transient Telegram transport error: %s", context.error)
+            return
+
         exc_info = None
         if context.error is not None:
             exc_info = (type(context.error), context.error, context.error.__traceback__)

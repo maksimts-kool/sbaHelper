@@ -20,6 +20,7 @@ from core.config import TELEGRAM_TOKEN, TZ_NAME
 from monitoring.logging_utils import configure_logging
 from monitoring.runtime import HeartbeatMonitor
 from monitoring.sentry import init_sentry
+from monitoring.telegram_errors import is_transient_telegram_error
 
 configure_logging("sbaradio-bot")
 init_sentry("sbaradio-bot")
@@ -61,6 +62,11 @@ if __name__ == "__main__":
         monitor.beat(status="running", active_chats=len(CHATS_DB))
 
     async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
+        if is_transient_telegram_error(context.error):
+            logger.warning("Transient Telegram transport error: %s", context.error)
+            monitor.beat(status="running", active_chats=len(CHATS_DB))
+            return
+
         exc_info = None
         if context.error is not None:
             exc_info = (type(context.error), context.error, context.error.__traceback__)

@@ -42,7 +42,7 @@ IGNORED_KEYWORDS = ["intro","tts_schedule", "schedule"]
 
 # --- Поднятие песен (Best Playlist) ---
 BEST_PLAYLIST_ID = int(os.getenv("BEST_PLAYLIST_ID", "17"))
-UPVOTE_THRESHOLD = int(os.getenv("UPVOTE_THRESHOLD", "10"))
+UPVOTE_THRESHOLD = int(os.getenv("UPVOTE_THRESHOLD", "5"))
 
 # --- Пути к файлам ---
 CHATS_FILE = os.path.join("bot_data", "active_chats.json")
