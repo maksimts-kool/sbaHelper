@@ -169,26 +169,70 @@ def _get_active_block_items(schedule: list) -> list:
     ]
 
 
+def _group_schedule_items(items: list) -> list[list]:
+    """Группирует элементы расписания по одинаковому интервалу (с точностью до минуты)."""
+    groups: dict[tuple[int, int], list] = {}
+    for item in items:
+        key = (
+            item.get('start_timestamp', 0) // 60,
+            item.get('end_timestamp', 0) // 60,
+        )
+        groups.setdefault(key, []).append(item)
+    return list(groups.values())
+
+
+def _format_schedule_item_name(item: dict) -> str:
+    raw_name = str(item.get('name') or item.get('title') or '')
+    return escape_md(PLAYLIST_NAMES.get(raw_name.lower(), raw_name))
+
+
+def format_schedule_items_summary(items: list, range_mode: str = 'until') -> str:
+    """
+    Форматирует список элементов расписания с учётом разных временных диапазонов.
+
+    `range_mode='until'`  -> "Общие _(до 23:59)_"
+    `range_mode='range'`  -> "Общие _(00:00 – 23:59)_"
+    """
+    if not items:
+        return ""
+
+    now_ts = int(time_module.time())
+    parts: list[str] = []
+
+    for group_items in _group_schedule_items(items):
+        first = group_items[0]
+        start_ts = first.get('start_timestamp', 0)
+        end_ts = first.get('end_timestamp', 0)
+        names = ", ".join(_format_schedule_item_name(item) for item in group_items)
+
+        if range_mode == 'range' and start_ts and end_ts:
+            if _sched_same_day(now_ts, start_ts):
+                time_label = f"{_fmt_sched_time(start_ts)} – {_fmt_sched_time(end_ts)}"
+            else:
+                time_label = f"{_fmt_sched_date_time(start_ts)} – {_fmt_sched_time(end_ts)}"
+        elif end_ts:
+            time_label = f"до {_fmt_sched_time(end_ts)}"
+        else:
+            time_label = "по расписанию"
+
+        parts.append(f"{names} _({time_label})_")
+
+    return "; ".join(parts)
+
+
+def format_active_schedule_summary(schedule: list) -> str:
+    """Возвращает краткую сводку по активным блокам расписания."""
+    return format_schedule_items_summary(_get_active_block_items(schedule), range_mode='until')
+
+
 def format_queue_list(queue_data: list, schedule: list | None = None) -> str:
     """Сообщение 2: Далее в эфире."""
     # Build schedule block header
     sched_prefix = ""
     if schedule:
-        active = _get_active_block_items(schedule)
-        if active:
-            first = active[0]
-            end_ts = first.get('end_timestamp', 0)
-            names = ", ".join(
-                escape_md(
-                    PLAYLIST_NAMES.get(
-                        str(item.get('name') or '').lower(),
-                        str(item.get('name') or ''),
-                    )
-                )
-                for item in active
-            )
-            end_str = _fmt_sched_time(end_ts) if end_ts else "?"
-            sched_prefix = f"📅 *Сейчас:* {names} _(до {end_str})_\n"
+        active_summary = format_active_schedule_summary(schedule)
+        if active_summary:
+            sched_prefix = f"📅 *Сейчас:* {active_summary}\n"
 
     if not queue_data or not isinstance(queue_data, list):
         return sched_prefix + "📂 **Очередь воспроизведения пуста.**"
@@ -533,30 +577,11 @@ def format_schedule_ended(
         )
 
     if next_items:
-        n       = next_items[0]
-        n_start = n.get('start_timestamp', 0)
-        n_end   = n.get('end_timestamp', 0)
-        n_start_fmt = _fmt_sched_time(n_start) if n_start else "?"
-        n_end_fmt   = _fmt_sched_time(n_end)   if n_end   else "?"
-        n_names = ", ".join(
-            escape_md(
-                PLAYLIST_NAMES.get(
-                    str(item.get('name') or '').lower(),
-                    str(item.get('name') or '?'),
-                )
-            )
-            for item in next_items
-        )
-        now_ts = int(time_module.time())
-        if n_start and _sched_same_day(now_ts, n_start):
-            next_str = f"в *{n_start_fmt} – {n_end_fmt}*"
-        else:
-            next_str = f"*{_fmt_sched_date_time(n_start)} – {n_end_fmt}*"
+        next_str = format_schedule_items_summary(next_items, range_mode='range')
         return (
             f"✅ Блок песен *{time_range}* закончился\n"
             f"📋 Для: {names}\n"
-            f"⏭ Следующий блок песен {next_str}\n"
-            f"📋 Для: {n_names}"
+            f"⏭ Следующий блок песен: {next_str}"
         )
     return (
         f"✅ Блок песен *{time_range}* закончился\n"

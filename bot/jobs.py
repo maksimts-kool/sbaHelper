@@ -11,19 +11,17 @@ from telegram.ext import ContextTypes
 from analytics import engine as analytics_engine
 from bot.api import get_queue_data, get_schedule, get_station_data
 from bot.formatters import (
-    _fmt_sched_time,
     clean_track_info,
-    escape_md,
     escape_md_v2,
     format_intervals_text,
     format_main_message,
     format_queue_list,
     format_radio_shutdown_notice,
     format_schedule_ended,
+    format_schedule_items_summary,
     format_schedule_started,
     get_keyboard,
 )
-from services.playlist_names import PLAYLIST_NAMES
 from bot.state import (
     CHATS_DB,
     LAST_MSG_STATE,
@@ -300,21 +298,8 @@ async def schedule_notify_job(context: ContextTypes.DEFAULT_TYPE) -> None:
             # Build next-block info
             n_str = ""
             if next_items:
-                n = next_items[0]
-                n_start = n.get('start_timestamp', 0)
-                n_end = n.get('end_timestamp', 0)
-                n_names = ", ".join(
-                    escape_md(PLAYLIST_NAMES.get(i.get('name', '').lower(), i.get('name', '')))
-                    for i in next_items
-                )
-                n_str = (
-                    f"\n⏭ Следующий блок: *{_fmt_sched_time(n_start)} – {_fmt_sched_time(n_end)}*"
-                    f"\n📋 {n_names}"
-                )
-            cur_names = ", ".join(
-                escape_md(PLAYLIST_NAMES.get(i.get('name', '').lower(), i.get('name', '')))
-                for i in active_items.values()
-            )
+                n_str = f"\n⏭ Следующий блок: {format_schedule_items_summary(next_items, range_mode='range')}"
+            cur_names = format_schedule_items_summary(list(active_items.values()))
             mins_left = int(secs_left // 60) + 1
             warn_msg = (
                 f"⏰ До конца блока осталось *{mins_left} мин*\n"
