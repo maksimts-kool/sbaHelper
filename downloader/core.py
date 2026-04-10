@@ -212,6 +212,14 @@ def _pick_cookie_file(url: str) -> str | None:
     return None
 
 
+def _get_format_selector(url: str) -> str:
+    return (
+        "bestvideo*[height<=1080]+bestaudio/"
+        "best*[height<=1080]/"
+        "bestvideo*+bestaudio/best"
+    )
+
+
 def _normalize_video_info(url: str, meta: dict, duration: int) -> VideoInfo:
     title = _pick_first_text(meta, "title", "fulltitle", "alt_title") or "Без названия"
     uploader = _pick_first_text(
@@ -371,14 +379,9 @@ def download_video(
         "quiet": True,
         "no_warnings": True,
         "outtmpl": output_template,
-        # Сначала пробуем объединить видео+аудио до 1080p,
-        # иначе берём лучший готовый mp4, иначе любой лучший формат
-        "format": (
-            "bestvideo[height<=1080][ext=mp4]+bestaudio[ext=m4a]/"
-            "bestvideo[height<=1080]+bestaudio/"
-            "best[height<=1080][ext=mp4]/"
-            "best[ext=mp4]/best"
-        ),
+        # Для всех платформ сначала пробуем лучший video+audio до 1080p,
+        # а если контейнер не mp4, ffmpeg потом приведёт результат к mp4.
+        "format": _get_format_selector(url),
         "merge_output_format": "mp4",
         # Не качаем playlist-ы — только одно видео
         "noplaylist": True,
