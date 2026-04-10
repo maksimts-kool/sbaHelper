@@ -8,7 +8,6 @@ import re
 import uuid
 from dataclasses import dataclass
 from typing import Callable
-from urllib.parse import parse_qs, unquote, urlparse
 
 import yt_dlp
 
@@ -302,85 +301,7 @@ def _rewrite_download_error(url: str, err_msg: str) -> str:
             "или настройте COOKIES_BROWSER (например firefox/chrome/edge) "
             "с профилем, где вы уже вошли в аккаунт."
         )
-    if _is_facebook_url(url) and "unsupported url:" in lower_err and "/login/?next=" in lower_err:
-        return (
-            "Facebook share-ссылка редиректит на страницу входа. Попробую открыть прямой Reel/Video URL автоматически, "
-            "а если это не поможет — нужен свежий COOKIES_FILE/COOKIES_BROWSER или сама прямая ссылка вида /reel/... или /watch/?v=..."
-        )
     return err_msg
-
-
-def _extract_facebook_login_redirect_url(err_msg: str) -> str | None:
-    match = re.search(r"Unsupported URL:\s*(https?://\S+)", err_msg, re.IGNORECASE)
-    if not match:
-        return None
-
-    redirect_url = match.group(1).rstrip(")]")
-    parsed = urlparse(redirect_url)
-    if "facebook.com" not in parsed.netloc.lower() or not parsed.path.startswith("/login"):
-        return None
-
-    next_values = parse_qs(parsed.query).get("next")
-    if not next_values:
-        return None
-
-    return unquote(next_values[0])
-
-
-def _build_facebook_fallback_urls(original_url: str, err_msg: str) -> list[str]:
-    if not _is_facebook_url(original_url):
-        return []
-
-    redirect_target = _extract_facebook_login_redirect_url(err_msg)
-    if not redirect_target:
-        return []
-
-    parsed = urlparse(redirect_target)
-    query = parse_qs(parsed.query)
-    story_id = (query.get("story_fbid") or query.get("fbid") or [None])[0]
-    owner_id = (query.get("id") or [None])[0]
-
-    candidates: list[str] = []
-    if story_id:
-        candidates.append(f"https://www.facebook.com/reel/{story_id}/")
-        candidates.append(f"https://www.facebook.com/watch/?v={story_id}")
-        if owner_id:
-            candidates.append(f"https://www.facebook.com/{owner_id}/videos/{story_id}/")
-
-    deduplicated: list[str] = []
-    seen: set[str] = set()
-    for candidate in candidates:
-        if candidate not in seen:
-            seen.add(candidate)
-            deduplicated.append(candidate)
-    return deduplicated
-
-
-def _extract_info_with_fallback(url: str, ydl_opts: dict, download: bool) -> tuple[dict, str]:
-    attempts = [url]
-    tried: set[str] = set()
-    last_error: yt_dlp.utils.DownloadError | None = None
-
-    while attempts:
-        candidate_url = attempts.pop(0)
-        if candidate_url in tried:
-            continue
-        tried.add(candidate_url)
-
-        try:
-            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                meta = ydl.extract_info(candidate_url, download=download)
-            return meta, candidate_url
-        except yt_dlp.utils.DownloadError as e:
-            last_error = e
-            fallback_urls = _build_facebook_fallback_urls(url, str(e))
-            for fallback_url in fallback_urls:
-                if fallback_url not in tried and fallback_url not in attempts:
-                    logger.info("Retrying Facebook URL %s with fallback candidate %s", url, fallback_url)
-                    attempts.append(fallback_url)
-
-    assert last_error is not None
-    raise DownloadError(_rewrite_download_error(url, str(last_error))) from last_error
 
 
 # --------------------------------------------------------------------------- #
@@ -400,9 +321,10 @@ def fetch_info(url: str) -> VideoInfo:
     }
     _apply_auth_options(ydl_opts)
     try:
-        meta, resolved_url = _extract_info_with_fallback(url, ydl_opts, download=False)
-    except DownloadError as e:
-        err_msg = str(e)
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            meta = ydl.extract_info(url, download=False)
+    except yt_dlp.utils.DownloadError as e:
+        err_msg = _rewrite_download_error(url, str(e))
         if "unsupported url" in err_msg.lower() and ("/photo/" in url.lower() or "/photo/" in err_msg.lower()):
             raise UnsupportedContentError("Фото-посты не поддерживаются. Только обычные видео.") from e
         raise DownloadError(err_msg) from e
@@ -424,7 +346,7 @@ def fetch_info(url: str) -> VideoInfo:
             f"Максимум — {MAX_DURATION_SEC // 60} мин."
         )
 
-    return _normalize_video_info(resolved_url, meta, duration)
+    return _normalize_video_info(url, meta, duration)
 
 
 def download_video(
@@ -474,9 +396,10 @@ def download_video(
     _apply_auth_options(ydl_opts)
 
     try:
-        meta, resolved_url = _extract_info_with_fallback(url, ydl_opts, download=True)
-    except DownloadError as e:
-        raise DownloadError(str(e)) from e
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            meta = ydl.extract_info(url, download=True)
+    except yt_dlp.utils.DownloadError as e:
+        raise DownloadError(_rewrite_download_error(url, str(e))) from e
 
     duration = int(meta.get("duration") or 0)
     if duration > MAX_DURATION_SEC:
@@ -503,7 +426,7 @@ def download_video(
             f"Telegram принимает до {MAX_FILE_SIZE_MB} МБ."
         )
 
-    info = _normalize_video_info(resolved_url, meta, duration)
+    info = _normalize_video_info(url, meta, duration)
 
     logger.info("Downloaded: %s (%.1f MB, %ds)", downloaded_file, size_mb, duration)
     return DownloadResult(file_path=downloaded_file, info=info)
