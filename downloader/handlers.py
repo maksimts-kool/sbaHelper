@@ -104,7 +104,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
     # --- 1. Получаем информацию ---
     status_msg = await message.reply_text(
-        f"{INFO_EMOJI} Получаю информацию о видео\.\.\.",
+        f"{INFO_EMOJI} Получаю информацию о видео\\.\\.\\.",
         parse_mode="MarkdownV2",
     )
 
@@ -129,7 +129,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         return
     except Exception as e:
         logger.exception("Unexpected error in fetch_info")
-        await _safe_edit(status_msg, "❌ Неизвестная ошибка при получении информации\.")
+        await _safe_edit(status_msg, "❌ Неизвестная ошибка при получении информации\\.")
         return
 
     duration_str = f" · {_format_duration(info.duration)}" if info.duration else ""
@@ -139,7 +139,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             info.title,
             info.uploader,
             duration_str,
-            f"{DOWNLOAD_EMOJI} Скачиваю видео\.\.\.",
+            f"{DOWNLOAD_EMOJI} Скачиваю видео\\.\\.\\.",
         ),
     )
     await context.bot.send_chat_action(chat_id=chat_id, action=ChatAction.UPLOAD_VIDEO)
@@ -165,7 +165,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
                         info.title,
                         info.uploader,
                         duration_str,
-                        f"{DOWNLOAD_EMOJI} Скачиваю: \[{bar}\] {rounded}%",
+                        f"{DOWNLOAD_EMOJI} Скачиваю: \\[{bar}\\] {rounded}%",
                     ),
                 ),
                 loop,
@@ -190,7 +190,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         return
     except Exception:
         logger.exception("[%s] Unexpected error in download_video for %s", chat_label, url)
-        await _safe_edit(status_msg, "❌ Неизвестная ошибка при скачивании\.")
+        await _safe_edit(status_msg, "❌ Неизвестная ошибка при скачивании\\.")
         return
 
     logger.info("[%s] Download complete: %s", chat_label, result.file_path)
@@ -203,7 +203,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             info.title,
             info.uploader,
             duration_str,
-            f"{SEND_VIDEO_EMOJI} Отправляю видео\.\.\.",
+            f"{SEND_VIDEO_EMOJI} Отправляю видео\\.\\.\\.",
         ),
     )
     await context.bot.send_chat_action(chat_id=chat_id, action=ChatAction.UPLOAD_VIDEO)
