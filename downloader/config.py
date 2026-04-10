@@ -20,11 +20,9 @@ MAX_DURATION_SEC = int(os.getenv("MAX_DURATION_SEC", "600"))  # 10 минут
 DOWNLOAD_DIR = os.getenv("DOWNLOAD_DIR", "/tmp/downloader_videos")
 
 # --- Куки для авторизации (Netscape cookies.txt) ---
-# Можно указать общий файл COOKIES_FILE или отдельные файлы по платформам.
+# Нужны для видео с ограниченным доступом (TikTok / Facebook и т.д.).
+# Путь к файлу внутри контейнера, например: /app/cookies/auth.txt
 COOKIES_FILE = os.getenv("COOKIES_FILE", "")
-COOKIES_FILE_TIKTOK = os.getenv("COOKIES_FILE_TIKTOK", "").strip()
-COOKIES_FILE_FACEBOOK = os.getenv("COOKIES_FILE_FACEBOOK", "").strip()
-COOKIES_FILE_YOUTUBE = os.getenv("COOKIES_FILE_YOUTUBE", "").strip()
 
 # --- Куки из браузера ---
 # Удобно для локального запуска на той же машине, где уже выполнен вход в Facebook.
