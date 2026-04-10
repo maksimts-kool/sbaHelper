@@ -7,6 +7,7 @@ import html
 import logging
 import os
 import re
+import threading
 
 from telegram import Message, Update
 from telegram.constants import ChatAction
@@ -123,6 +124,30 @@ async def _safe_edit(msg: Message, text: str) -> None:
             logger.warning("edit_text error: %s", e)
 
 
+def _build_download_progress_line(progress_pct: int) -> str:
+    bounded_pct = max(0, min(progress_pct, 100))
+    bar = "▓" * (bounded_pct // 10) + "░" * (10 - bounded_pct // 10)
+    return f"{DOWNLOAD_EMOJI} Скачиваю: \\[{bar}\\] {bounded_pct}%"
+
+
+async def _safe_delete_message(message: Message, retries: int = 3, delay: float = 0.4) -> None:
+    """Удаляет сообщение с несколькими попытками на случай временной ошибки Telegram."""
+    for attempt in range(1, retries + 1):
+        try:
+            await message.delete()
+            return
+        except TelegramError as e:
+            error_text = str(e).lower()
+            if "message to delete not found" in error_text:
+                return
+
+            if attempt == retries:
+                logger.warning("delete_message error after %d attempts: %s", retries, e)
+                return
+
+            await asyncio.sleep(delay)
+
+
 # --------------------------------------------------------------------------- #
 #  Основной обработчик                                                         #
 # --------------------------------------------------------------------------- #
@@ -192,35 +217,52 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             info.title,
             info.uploader,
             duration_str,
-            f"{DOWNLOAD_EMOJI} Скачиваю видео\\.\\.\\.",
+            _build_download_progress_line(0),
         ),
     )
     await context.bot.send_chat_action(chat_id=chat_id, action=ChatAction.UPLOAD_VIDEO)
 
     # --- 2. Скачиваем ---
     result: DownloadResult | None = None
-    last_reported_pct = -1
+    last_reported_pct = 0
+    progress_state = {"stage": "download", "version": 0}
+    progress_state_lock = threading.Lock()
     logger.info("[%s] Starting download: %s", chat_label, url)
+
+    async def _apply_download_status(progress_pct: int, expected_version: int) -> None:
+        with progress_state_lock:
+            is_current_download_stage = (
+                progress_state["stage"] == "download" and progress_state["version"] == expected_version
+            )
+        if not is_current_download_stage:
+            return
+
+        await _safe_edit(
+            status_msg,
+            _build_status_text(
+                info.title,
+                info.uploader,
+                duration_str,
+                _build_download_progress_line(progress_pct),
+            ),
+        )
 
     def on_progress(pct: float) -> None:
         nonlocal last_reported_pct
-        # обновляем статус только каждые 20%
-        rounded = int(pct // 20) * 20
-        if rounded != last_reported_pct:
+        # Показываем прогресс с 0% и не даём ему перескакивать назад.
+        bounded = min(100, max(0, int(pct)))
+        rounded = (bounded // 10) * 10
+
+        with progress_state_lock:
+            if progress_state["stage"] != "download":
+                return
+            expected_version = progress_state["version"]
+
+        if rounded > last_reported_pct:
             last_reported_pct = rounded
-            bar = "▓" * (rounded // 10) + "░" * (10 - rounded // 10)
             logger.info("[%s] Download progress: %d%%", chat_label, rounded)
-            # Безопасный вызов корутины из потока без event loop
             asyncio.run_coroutine_threadsafe(
-                _safe_edit(
-                    status_msg,
-                    _build_status_text(
-                        info.title,
-                        info.uploader,
-                        duration_str,
-                        f"{DOWNLOAD_EMOJI} Скачиваю: \\[{bar}\\] {rounded}%",
-                    ),
-                ),
+                _apply_download_status(rounded, expected_version),
                 loop,
             )
 
@@ -247,9 +289,21 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         return
 
     logger.info("[%s] Download complete: %s", chat_label, result.file_path)
+    await _safe_edit(
+        status_msg,
+        _build_status_text(
+            info.title,
+            info.uploader,
+            duration_str,
+            _build_download_progress_line(100),
+        ),
+    )
 
     # --- 3. Отправляем ---
     logger.info("[%s] Sending video to chat...", chat_label)
+    with progress_state_lock:
+        progress_state["stage"] = "sending"
+        progress_state["version"] += 1
     await _safe_edit(
         status_msg,
         _build_status_text(
@@ -261,6 +315,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     )
     await context.bot.send_chat_action(chat_id=chat_id, action=ChatAction.UPLOAD_VIDEO)
 
+    send_failed = False
     try:
         with open(result.file_path, "rb") as video_file:
             caption = _build_video_caption(result.info)
@@ -273,16 +328,15 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
                 reply_to_message_id=message.message_id,
             )
     except TelegramError as e:
+        send_failed = True
         logger.error("[%s] Failed to send video: %s", chat_label, e)
         await _safe_edit(status_msg, f"❌ Не удалось отправить видео: {_escape_md_v2(str(e))}")
-        return
     else:
         logger.info("[%s] Video sent successfully to %s", chat_label, user_label)
     finally:
         cleanup(result.file_path)
+        if not send_failed:
+            await _safe_delete_message(status_msg)
 
-    # Удаляем статусное сообщение
-    try:
-        await status_msg.delete()
-    except TelegramError:
-        pass
+    if send_failed:
+        return
