@@ -54,14 +54,17 @@ services:
     command: [ "python", "downloader_bot.py" ]
     volumes:
       - /tmp/downloader_videos:/tmp/downloader_videos # временные видео
-      - ./cookies:/app/cookies # cookies.txt для авторизации на сайтах вроде TikTok / Facebook
+      - ./cookies:/app/cookies # cookies.txt для авторизации на сайтах вроде TikTok / Facebook / YouTube
       - ./runtime:/app/runtime
     environment:
       DOWNLOADER_BOT_TOKEN: ${DOWNLOADER_BOT_TOKEN:-}
       ALLOWED_CHAT_IDS: ${ALLOWED_CHAT_IDS:-} # только эта группа; несколько — через запятую
       MAX_FILE_SIZE_MB: ${MAX_FILE_SIZE_MB:-50} # макс. размер файла для Telegram
       MAX_DURATION_SEC: ${MAX_DURATION_SEC:-300} # макс. длительность (5 мин)
-      COOKIES_FILE: ${COOKIES_FILE:-/app/cookies/tiktok.txt}
+      COOKIES_FILE: ${COOKIES_FILE:-}
+      COOKIES_FILE_TIKTOK: ${COOKIES_FILE_TIKTOK:-/app/cookies/tiktok.txt}
+      COOKIES_FILE_FACEBOOK: ${COOKIES_FILE_FACEBOOK:-/app/cookies/facebook.txt}
+      COOKIES_FILE_YOUTUBE: ${COOKIES_FILE_YOUTUBE:-/app/cookies/youtube.txt}
       COOKIES_BROWSER: ${COOKIES_BROWSER:-}
       COOKIES_BROWSER_PROFILE: ${COOKIES_BROWSER_PROFILE:-}
       COOKIES_BROWSER_KEYRING: ${COOKIES_BROWSER_KEYRING:-}

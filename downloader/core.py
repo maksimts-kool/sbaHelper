@@ -17,6 +17,9 @@ from downloader.config import (
     COOKIES_BROWSER_KEYRING,
     COOKIES_BROWSER_PROFILE,
     COOKIES_FILE,
+    COOKIES_FILE_FACEBOOK,
+    COOKIES_FILE_TIKTOK,
+    COOKIES_FILE_YOUTUBE,
     DOWNLOAD_DIR,
     DOWNLOADER_USER_AGENT,
     MAX_DURATION_SEC,
@@ -101,15 +104,13 @@ def _get_browser_cookie_spec() -> tuple[str, str | None, str | None, str | None]
     )
 
 
-def _apply_auth_options(ydl_opts: dict) -> None:
+def _apply_auth_options(url: str, ydl_opts: dict) -> None:
     auth_sources: list[str] = []
 
-    if COOKIES_FILE:
-        if os.path.exists(COOKIES_FILE):
-            ydl_opts["cookiefile"] = COOKIES_FILE
-            auth_sources.append(f"cookiefile={COOKIES_FILE}")
-        else:
-            logger.warning("COOKIES_FILE is set but not found: %s", COOKIES_FILE)
+    cookie_file = _pick_cookie_file(url)
+    if cookie_file:
+        ydl_opts["cookiefile"] = cookie_file
+        auth_sources.append(f"cookiefile={cookie_file}")
 
     browser_cookie_spec = _get_browser_cookie_spec()
     if browser_cookie_spec:
@@ -135,6 +136,16 @@ def _apply_auth_options(ydl_opts: dict) -> None:
 def _is_facebook_url(url: str) -> bool:
     lowered = url.lower()
     return "facebook.com" in lowered or "fb.watch" in lowered
+
+
+def _is_youtube_url(url: str) -> bool:
+    lowered = url.lower()
+    return "youtube.com" in lowered or "youtu.be" in lowered
+
+
+def _is_tiktok_url(url: str) -> bool:
+    lowered = url.lower()
+    return "tiktok.com" in lowered
 
 
 def _parse_compact_count(raw_value: str) -> int | None:
@@ -177,6 +188,27 @@ def _pick_first_int(meta: dict, *keys: str) -> int | None:
             parsed = _parse_compact_count(value)
             if parsed is not None:
                 return parsed
+    return None
+
+
+def _pick_cookie_file(url: str) -> str | None:
+    candidates: list[str] = []
+
+    if _is_youtube_url(url) and COOKIES_FILE_YOUTUBE:
+        candidates.append(COOKIES_FILE_YOUTUBE)
+    elif _is_facebook_url(url) and COOKIES_FILE_FACEBOOK:
+        candidates.append(COOKIES_FILE_FACEBOOK)
+    elif _is_tiktok_url(url) and COOKIES_FILE_TIKTOK:
+        candidates.append(COOKIES_FILE_TIKTOK)
+
+    if COOKIES_FILE:
+        candidates.append(COOKIES_FILE)
+
+    for path in candidates:
+        if os.path.exists(path):
+            return path
+        logger.warning("Cookie file is configured but not found: %s", path)
+
     return None
 
 
@@ -239,8 +271,25 @@ def _rewrite_download_error(url: str, err_msg: str) -> str:
     ):
         return (
             "Facebook запросил авторизацию. Укажите свежий COOKIES_FILE "
-            "или настройте COOKIES_BROWSER (например firefox/chrome/edge) "
+            "или COOKIES_FILE_FACEBOOK, либо настройте COOKIES_BROWSER "
+            "(например firefox/chrome/edge) "
             "с профилем, где вы уже вошли в аккаунт."
+        )
+    if _is_youtube_url(url) and any(
+        token in lower_err
+        for token in (
+            "sign in to confirm you're not a bot",
+            "sign in to confirm you’re not a bot",
+            "use --cookies-from-browser or --cookies",
+            "please sign in",
+            "this helps protect our community",
+        )
+    ):
+        return (
+            "YouTube запросил авторизацию. Используйте COOKIES_FILE "
+            "или COOKIES_FILE_YOUTUBE с куками из браузера, где вы уже "
+            "вошли в YouTube/Google. Если бот запущен в Docker, положите "
+            "отдельный youtube.txt в /app/cookies."
         )
     return err_msg
 
@@ -260,7 +309,7 @@ def fetch_info(url: str) -> VideoInfo:
         "no_warnings": True,
         "skip_download": True,
     }
-    _apply_auth_options(ydl_opts)
+    _apply_auth_options(url, ydl_opts)
     try:
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             meta = ydl.extract_info(url, download=False)
@@ -339,7 +388,7 @@ def download_video(
         # Ограничиваем время ожидания сокета
         "socket_timeout": 30,
     }
-    _apply_auth_options(ydl_opts)
+    _apply_auth_options(url, ydl_opts)
 
     try:
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
