@@ -1,6 +1,6 @@
 """
 Downloader Bot — entrypoint.
-Слушает сообщения с TikTok / YouTube Shorts ссылками и скачивает видео.
+Слушает сообщения с TikTok / YouTube Shorts / Facebook ссылками и скачивает видео.
 """
 import logging
 
@@ -99,11 +99,14 @@ if __name__ == "__main__":
     # /start — краткая инструкция
     async def cmd_start(update, context):
         await update.message.reply_text(
-            "👋 Привет! Я скачиваю видео из <b>TikTok</b> и <b>YouTube Shorts</b>.\n\n"
+            "👋 Привет! Я скачиваю видео из <b>TikTok</b>, <b>YouTube Shorts</b> и <b>Facebook</b>.\n\n"
             "Просто отправь мне ссылку:\n"
             "• <code>https://vm.tiktok.com/...</code>\n"
             "• <code>https://www.tiktok.com/...</code>\n"
-            "• <code>https://youtube.com/shorts/...</code>\n\n"
+            "• <code>https://youtube.com/shorts/...</code>\n"
+            "• <code>https://www.facebook.com/watch/?v=...</code>\n"
+            "• <code>https://www.facebook.com/reel/...</code>\n"
+            "• <code>https://fb.watch/...</code>\n\n"
             "Максимальная длительность — 5 мин, размер файла — до 50 МБ.",
             parse_mode="HTML",
         )

@@ -20,9 +20,20 @@ MAX_DURATION_SEC = int(os.getenv("MAX_DURATION_SEC", "600"))  # 10 минут
 DOWNLOAD_DIR = os.getenv("DOWNLOAD_DIR", "/tmp/downloader_videos")
 
 # --- Куки для авторизации (Netscape cookies.txt) ---
-# Нужны для TikTok-видео с ограниченным доступом.
-# Путь к файлу внутри контейнера, например: /app/cookies/tiktok.txt
+# Нужны для видео с ограниченным доступом (TikTok / Facebook и т.д.).
+# Путь к файлу внутри контейнера, например: /app/cookies/auth.txt
 COOKIES_FILE = os.getenv("COOKIES_FILE", "")
+
+# --- Куки из браузера ---
+# Удобно для локального запуска на той же машине, где уже выполнен вход в Facebook.
+# Поддерживаемые браузеры yt-dlp: brave, chrome, chromium, edge, firefox, opera, safari, vivaldi, whale
+COOKIES_BROWSER = os.getenv("COOKIES_BROWSER", "").strip().lower()
+COOKIES_BROWSER_PROFILE = os.getenv("COOKIES_BROWSER_PROFILE", "").strip()
+COOKIES_BROWSER_KEYRING = os.getenv("COOKIES_BROWSER_KEYRING", "").strip().lower()
+COOKIES_BROWSER_CONTAINER = os.getenv("COOKIES_BROWSER_CONTAINER", "").strip()
+
+# Иногда сайт требует тот же User-Agent, что и у браузера с актуальной сессией.
+DOWNLOADER_USER_AGENT = os.getenv("DOWNLOADER_USER_AGENT", "").strip()
 
 # --- Разрешённые чаты ---
 # Список chat_id через запятую, например: "-1001234567890,-1009876543210"
@@ -37,4 +48,6 @@ SUPPORTED_URL_PATTERNS: list[re.Pattern] = [
     re.compile(r"https?://vm\.tiktok\.com/\S+", re.IGNORECASE),
     re.compile(r"https?://(www\.)?tiktok\.com/\S+", re.IGNORECASE),
     re.compile(r"https?://(www\.)?youtube\.com/shorts/\S+", re.IGNORECASE),
+    re.compile(r"https?://(?:www\.|m\.|mbasic\.)?facebook\.com/\S+", re.IGNORECASE),
+    re.compile(r"https?://fb\.watch/\S+", re.IGNORECASE),
 ]

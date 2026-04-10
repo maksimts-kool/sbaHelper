@@ -1,6 +1,6 @@
 """
 Ядро загрузки видео.
-Использует yt-dlp для скачивания видео с TikTok / YouTube Shorts.
+Использует yt-dlp для скачивания видео с TikTok / YouTube Shorts / Facebook.
 """
 import logging
 import os
@@ -11,9 +11,31 @@ from typing import Callable
 
 import yt_dlp
 
-from downloader.config import COOKIES_FILE, DOWNLOAD_DIR, MAX_DURATION_SEC, MAX_FILE_SIZE_MB
+from downloader.config import (
+    COOKIES_BROWSER,
+    COOKIES_BROWSER_CONTAINER,
+    COOKIES_BROWSER_KEYRING,
+    COOKIES_BROWSER_PROFILE,
+    COOKIES_FILE,
+    DOWNLOAD_DIR,
+    DOWNLOADER_USER_AGENT,
+    MAX_DURATION_SEC,
+    MAX_FILE_SIZE_MB,
+)
 
 logger = logging.getLogger(__name__)
+
+SUPPORTED_BROWSER_COOKIE_SOURCES = {
+    "brave",
+    "chrome",
+    "chromium",
+    "edge",
+    "firefox",
+    "opera",
+    "safari",
+    "vivaldi",
+    "whale",
+}
 
 
 @dataclass
@@ -60,6 +82,80 @@ def _ensure_dir() -> str:
     return DOWNLOAD_DIR
 
 
+def _get_browser_cookie_spec() -> tuple[str, str | None, str | None, str | None] | None:
+    if not COOKIES_BROWSER:
+        return None
+    if COOKIES_BROWSER not in SUPPORTED_BROWSER_COOKIE_SOURCES:
+        logger.warning(
+            "Unsupported COOKIES_BROWSER=%r. Ignoring browser cookies.",
+            COOKIES_BROWSER,
+        )
+        return None
+    return (
+        COOKIES_BROWSER,
+        COOKIES_BROWSER_PROFILE or None,
+        COOKIES_BROWSER_KEYRING or None,
+        COOKIES_BROWSER_CONTAINER or None,
+    )
+
+
+def _apply_auth_options(ydl_opts: dict) -> None:
+    auth_sources: list[str] = []
+
+    if COOKIES_FILE:
+        if os.path.exists(COOKIES_FILE):
+            ydl_opts["cookiefile"] = COOKIES_FILE
+            auth_sources.append(f"cookiefile={COOKIES_FILE}")
+        else:
+            logger.warning("COOKIES_FILE is set but not found: %s", COOKIES_FILE)
+
+    browser_cookie_spec = _get_browser_cookie_spec()
+    if browser_cookie_spec:
+        ydl_opts["cookiesfrombrowser"] = browser_cookie_spec
+        browser_name, profile, _, container = browser_cookie_spec
+        details = [browser_name]
+        if profile:
+            details.append(f"profile={profile}")
+        if container:
+            details.append(f"container={container}")
+        auth_sources.append("browser=" + ", ".join(details))
+
+    if DOWNLOADER_USER_AGENT:
+        ydl_opts.setdefault("http_headers", {})["User-Agent"] = DOWNLOADER_USER_AGENT
+        auth_sources.append("custom-user-agent")
+
+    if auth_sources:
+        logger.debug("yt-dlp auth options enabled: %s", "; ".join(auth_sources))
+    else:
+        logger.debug("yt-dlp auth options are not configured.")
+
+
+def _is_facebook_url(url: str) -> bool:
+    lowered = url.lower()
+    return "facebook.com" in lowered or "fb.watch" in lowered
+
+
+def _rewrite_download_error(url: str, err_msg: str) -> str:
+    lower_err = err_msg.lower()
+    if _is_facebook_url(url) and any(
+        token in lower_err
+        for token in (
+            "login required",
+            "not logged in",
+            "requires authentication",
+            "please log in",
+            "content isn't available",
+            "video unavailable",
+        )
+    ):
+        return (
+            "Facebook запросил авторизацию. Укажите свежий COOKIES_FILE "
+            "или настройте COOKIES_BROWSER (например firefox/chrome/edge) "
+            "с профилем, где вы уже вошли в аккаунт."
+        )
+    return err_msg
+
+
 # --------------------------------------------------------------------------- #
 #  Публичный API                                                               #
 # --------------------------------------------------------------------------- #
@@ -75,14 +171,12 @@ def fetch_info(url: str) -> VideoInfo:
         "no_warnings": True,
         "skip_download": True,
     }
-    if COOKIES_FILE and os.path.exists(COOKIES_FILE):
-        ydl_opts["cookiefile"] = COOKIES_FILE
-        logger.debug("fetch_info: using cookies from %s", COOKIES_FILE)
+    _apply_auth_options(ydl_opts)
     try:
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             meta = ydl.extract_info(url, download=False)
     except yt_dlp.utils.DownloadError as e:
-        err_msg = str(e)
+        err_msg = _rewrite_download_error(url, str(e))
         if "unsupported url" in err_msg.lower() and ("/photo/" in url.lower() or "/photo/" in err_msg.lower()):
             raise UnsupportedContentError("Фото-посты не поддерживаются. Только обычные видео.") from e
         raise DownloadError(err_msg) from e
@@ -161,17 +255,13 @@ def download_video(
         # Ограничиваем время ожидания сокета
         "socket_timeout": 30,
     }
-    if COOKIES_FILE and os.path.exists(COOKIES_FILE):
-        ydl_opts["cookiefile"] = COOKIES_FILE
-        logger.debug("download_video: using cookies from %s", COOKIES_FILE)
-    else:
-        logger.debug("download_video: no cookies file (COOKIES_FILE=%r)", COOKIES_FILE)
+    _apply_auth_options(ydl_opts)
 
     try:
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             meta = ydl.extract_info(url, download=True)
     except yt_dlp.utils.DownloadError as e:
-        raise DownloadError(str(e)) from e
+        raise DownloadError(_rewrite_download_error(url, str(e))) from e
 
     duration = int(meta.get("duration") or 0)
     if duration > MAX_DURATION_SEC:

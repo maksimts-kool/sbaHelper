@@ -3,7 +3,7 @@ pydub>=0.25.1
 edge-tts>=6.1.8
 python-telegram-bot[job-queue]>=20.0
 pytz
-yt-dlp>=2024.1.1
+yt-dlp>=2025.12.08
 python-dotenv>=1.0.1
 tenacity>=9.0.0
 sentry-sdk>=2.25.1
