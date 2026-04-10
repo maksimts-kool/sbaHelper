@@ -72,16 +72,34 @@ def _format_count(value: int | None) -> str:
     return f"{formatted}{suffix}"
 
 
+def _prevent_auto_links(text: str) -> str:
+    """Ломает авто-детект Telegram для hashtag / mention / url / timestamps."""
+    sanitized = text.replace("#", "#\u2060").replace("@", "@\u2060")
+    sanitized = re.sub(r"(?i)\bhttps?://", lambda m: m.group(0)[0] + "\u2060" + m.group(0)[1:], sanitized)
+    sanitized = re.sub(r"\b(\d{1,2}):(\d{2})(?::(\d{2}))?\b", lambda m: m.group(0).replace(":", ":\u2060"), sanitized)
+    return sanitized
+
+
 def _build_video_caption(info) -> str:
-    duration_text = _format_duration(info.duration) if info.duration else "0:00"
-    title = html.escape(info.title)
-    uploader = html.escape(info.uploader)
-    return (
-        f"🎬 <b>{title}</b> - <tg-emoji emoji-id=\"{LENGTH_EMOJI_ID}\">⏱️</tg-emoji> {duration_text}\n"
-        f"<tg-emoji emoji-id=\"{VIEWS_EMOJI_ID}\">👁️</tg-emoji> {_format_count(info.view_count)} просмотров\n"
-        f"<tg-emoji emoji-id=\"{LIKES_EMOJI_ID}\">❤️</tg-emoji> {_format_count(info.like_count)} лайков\n"
-        f"👤 {uploader}"
-    )
+    duration_text = _prevent_auto_links(_format_duration(info.duration) if info.duration else "0:00")
+    title = html.escape(_prevent_auto_links(info.title))
+    uploader = html.escape(_prevent_auto_links(info.uploader))
+    lines = [
+        f"🎬 <b>{title}</b> | <tg-emoji emoji-id=\"{LENGTH_EMOJI_ID}\">⏱️</tg-emoji> {duration_text}"
+    ]
+
+    if info.view_count is not None:
+        lines.append(
+            f"<tg-emoji emoji-id=\"{VIEWS_EMOJI_ID}\">👁️</tg-emoji> {_format_count(info.view_count)} просмотров"
+        )
+
+    if info.like_count is not None:
+        lines.append(
+            f"<tg-emoji emoji-id=\"{LIKES_EMOJI_ID}\">❤️</tg-emoji> {_format_count(info.like_count)} лайков"
+        )
+
+    lines.append(f"👤 {uploader}")
+    return "\n".join(lines)
 
 
 def _escape_md_v2(text: str) -> str:

@@ -137,6 +137,46 @@ def _is_facebook_url(url: str) -> bool:
     return "facebook.com" in lowered or "fb.watch" in lowered
 
 
+def _is_tiktok_url(url: str) -> bool:
+    return "tiktok.com" in url.lower()
+
+
+def _is_youtube_shorts_url(url: str) -> bool:
+    return "youtube.com/shorts/" in url.lower()
+
+
+def _get_format_selector(url: str) -> str:
+    """
+    Возвращает безопасный format selector для разных платформ.
+
+    Идея:
+    - YouTube Shorts: предпочитаем раздельные video/audio до 1080p, затем progressive fallback.
+    - Facebook Reels: сначала пробуем готовый mp4, затем fallback на video+audio.
+    - TikTok: чаще всего лучший результат даёт готовый mp4 без агрессивного выбора дорожек.
+    """
+    if _is_youtube_shorts_url(url):
+        return (
+            "bestvideo[ext=mp4][height<=1080][vcodec!=none]+bestaudio[ext=m4a]/"
+            "bestvideo[height<=1080][vcodec!=none]+bestaudio/"
+            "best[ext=mp4][height<=1080]/best[height<=1080]/best"
+        )
+
+    if _is_facebook_url(url):
+        return (
+            "best[ext=mp4][height<=1080]/best[height<=1080]/"
+            "bestvideo[height<=1080][vcodec!=none]+bestaudio/"
+            "best"
+        )
+
+    if _is_tiktok_url(url):
+        return "best[ext=mp4][height<=1080]/best[height<=1080]/best"
+
+    return (
+        "bestvideo[height<=1080][vcodec!=none]+bestaudio/"
+        "best[ext=mp4][height<=1080]/best[height<=1080]/best"
+    )
+
+
 def _parse_compact_count(raw_value: str) -> int | None:
     cleaned = raw_value.strip().replace(",", "").replace(" ", "")
     match = re.fullmatch(r"(\d+(?:\.\d+)?)([KMB])?", cleaned, re.IGNORECASE)
@@ -162,6 +202,12 @@ def _pick_first_text(meta: dict, *keys: str) -> str | None:
             if stripped:
                 return stripped
     return None
+
+
+def _looks_like_generated_tiktok_title(title: str | None) -> bool:
+    if not title:
+        return False
+    return bool(re.fullmatch(r"TikTok video #\d+", title.strip(), re.IGNORECASE))
 
 
 def _pick_first_int(meta: dict, *keys: str) -> int | None:
@@ -205,14 +251,27 @@ def _normalize_video_info(url: str, meta: dict, duration: int) -> VideoInfo:
             view_match = re.search(r"([\d.,KMBkmb]+)\s+views\b", stats_part, re.IGNORECASE)
             reaction_match = re.search(r"([\d.,KMBkmb]+)\s+reactions?\b", stats_part, re.IGNORECASE)
 
+            parsed_view_count = _parse_compact_count(view_match.group(1)) if view_match else None
+            parsed_like_count = _parse_compact_count(reaction_match.group(1)) if reaction_match else None
+
             if possible_title:
                 title = possible_title
             if possible_author and uploader == "Неизвестно":
                 uploader = possible_author
-            if view_count in (None, 0):
-                view_count = _parse_compact_count(view_match.group(1)) if view_match else view_count
-            if like_count in (None, 0):
-                like_count = _parse_compact_count(reaction_match.group(1)) if reaction_match else like_count
+            if parsed_view_count is not None and (view_count in (None, 0) or parsed_view_count > view_count):
+                view_count = parsed_view_count
+            if parsed_like_count is not None and like_count in (None, 0):
+                like_count = parsed_like_count
+
+    if _is_tiktok_url(url):
+        if _looks_like_generated_tiktok_title(title):
+            better_title = _pick_first_text(meta, "description", "fulltitle", "alt_title")
+            if better_title:
+                title = better_title
+
+        better_uploader = _pick_first_text(meta, "channel", "creator", "uploader", "uploader_id")
+        if better_uploader:
+            uploader = better_uploader
 
     return VideoInfo(
         title=title,
