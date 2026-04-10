@@ -3,6 +3,7 @@
 Детектируют ссылки TikTok / YouTube Shorts и скачивают видео с отчётом прогресса.
 """
 import asyncio
+import html
 import logging
 import os
 import re
@@ -29,6 +30,9 @@ logger = logging.getLogger(__name__)
 INFO_EMOJI = "![ℹ️](tg://emoji?id=5231012545799666522)"
 DOWNLOAD_EMOJI = "![⬇️](tg://emoji?id=5386367538735104399)"
 SEND_VIDEO_EMOJI = "![📤](tg://emoji?id=5201691993775818138)"
+LENGTH_EMOJI_ID = "5350438526691326210"
+VIEWS_EMOJI_ID = "5210956306952758910"
+LIKES_EMOJI_ID = "5337080053119336309"
 
 
 # --------------------------------------------------------------------------- #
@@ -47,6 +51,24 @@ def _extract_url(text: str) -> str | None:
 def _format_duration(seconds: int) -> str:
     m, s = divmod(seconds, 60)
     return f"{m}:{s:02d}"
+
+
+def _format_count(value: int | None) -> str:
+    if value is None:
+        return "—"
+    return f"{value:,}".replace(",", " ")
+
+
+def _build_video_caption(info) -> str:
+    duration_text = _format_duration(info.duration) if info.duration else "0:00"
+    title = html.escape(info.title)
+    uploader = html.escape(info.uploader)
+    return (
+        f"🎬 <b>{title}</b> - <tg-emoji emoji-id=\"{LENGTH_EMOJI_ID}\"></tg-emoji> {duration_text}\n"
+        f"<tg-emoji emoji-id=\"{VIEWS_EMOJI_ID}\"></tg-emoji> {_format_count(info.view_count)} просмотров\n"
+        f"<tg-emoji emoji-id=\"{LIKES_EMOJI_ID}\"></tg-emoji> {_format_count(info.like_count)} лайков\n"
+        f"👤 {uploader}"
+    )
 
 
 def _escape_md_v2(text: str) -> str:
@@ -210,10 +232,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
     try:
         with open(result.file_path, "rb") as video_file:
-            caption = (
-                f"🎬 <b>{info.title}</b>\n"
-                f"👤 {info.uploader}{duration_str}"
-            )
+            caption = _build_video_caption(result.info)
             await context.bot.send_video(
                 chat_id=chat_id,
                 video=video_file,

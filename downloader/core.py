@@ -44,6 +44,8 @@ class VideoInfo:
     uploader: str
     duration: int       # секунды
     thumbnail: str | None
+    view_count: int | None
+    like_count: int | None
 
 
 @dataclass
@@ -203,6 +205,8 @@ def fetch_info(url: str) -> VideoInfo:
         uploader=meta.get("uploader") or meta.get("channel") or "Неизвестно",
         duration=duration,
         thumbnail=meta.get("thumbnail"),
+        view_count=meta.get("view_count"),
+        like_count=meta.get("like_count"),
     )
 
 
@@ -293,6 +297,8 @@ def download_video(
         uploader=meta.get("uploader") or meta.get("channel") or "Неизвестно",
         duration=duration,
         thumbnail=meta.get("thumbnail"),
+        view_count=meta.get("view_count"),
+        like_count=meta.get("like_count"),
     )
 
     logger.info("Downloaded: %s (%.1f MB, %ds)", downloaded_file, size_mb, duration)
