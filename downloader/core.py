@@ -137,6 +137,93 @@ def _is_facebook_url(url: str) -> bool:
     return "facebook.com" in lowered or "fb.watch" in lowered
 
 
+def _parse_compact_count(raw_value: str) -> int | None:
+    cleaned = raw_value.strip().replace(",", "").replace(" ", "")
+    match = re.fullmatch(r"(\d+(?:\.\d+)?)([KMB])?", cleaned, re.IGNORECASE)
+    if not match:
+        return None
+
+    number = float(match.group(1))
+    suffix = (match.group(2) or "").upper()
+    multiplier = {
+        "": 1,
+        "K": 1_000,
+        "M": 1_000_000,
+        "B": 1_000_000_000,
+    }[suffix]
+    return int(number * multiplier)
+
+
+def _pick_first_text(meta: dict, *keys: str) -> str | None:
+    for key in keys:
+        value = meta.get(key)
+        if isinstance(value, str):
+            stripped = value.strip()
+            if stripped:
+                return stripped
+    return None
+
+
+def _pick_first_int(meta: dict, *keys: str) -> int | None:
+    for key in keys:
+        value = meta.get(key)
+        if isinstance(value, bool):
+            continue
+        if isinstance(value, int):
+            return value
+        if isinstance(value, float):
+            return int(value)
+        if isinstance(value, str):
+            parsed = _parse_compact_count(value)
+            if parsed is not None:
+                return parsed
+    return None
+
+
+def _normalize_video_info(url: str, meta: dict, duration: int) -> VideoInfo:
+    title = _pick_first_text(meta, "title", "fulltitle", "alt_title") or "Без названия"
+    uploader = _pick_first_text(
+        meta,
+        "uploader",
+        "channel",
+        "creator",
+        "artist",
+        "channel_follower",
+        "uploader_id",
+        "channel_id",
+    ) or "Неизвестно"
+    view_count = _pick_first_int(meta, "view_count", "play_count")
+    like_count = _pick_first_int(meta, "like_count", "repost_count")
+
+    if _is_facebook_url(url) and isinstance(title, str):
+        parts = [part.strip() for part in title.split("|")]
+        if len(parts) >= 3:
+            stats_part = parts[0]
+            possible_title = " | ".join(part for part in parts[1:-1] if part)
+            possible_author = parts[-1]
+
+            view_match = re.search(r"([\d.,KMBkmb]+)\s+views\b", stats_part, re.IGNORECASE)
+            reaction_match = re.search(r"([\d.,KMBkmb]+)\s+reactions?\b", stats_part, re.IGNORECASE)
+
+            if possible_title:
+                title = possible_title
+            if possible_author and uploader == "Неизвестно":
+                uploader = possible_author
+            if view_count in (None, 0):
+                view_count = _parse_compact_count(view_match.group(1)) if view_match else view_count
+            if like_count in (None, 0):
+                like_count = _parse_compact_count(reaction_match.group(1)) if reaction_match else like_count
+
+    return VideoInfo(
+        title=title,
+        uploader=uploader,
+        duration=duration,
+        thumbnail=meta.get("thumbnail"),
+        view_count=view_count,
+        like_count=like_count,
+    )
+
+
 def _rewrite_download_error(url: str, err_msg: str) -> str:
     lower_err = err_msg.lower()
     if _is_facebook_url(url) and any(
@@ -200,14 +287,7 @@ def fetch_info(url: str) -> VideoInfo:
             f"Максимум — {MAX_DURATION_SEC // 60} мин."
         )
 
-    return VideoInfo(
-        title=meta.get("title", "Без названия"),
-        uploader=meta.get("uploader") or meta.get("channel") or "Неизвестно",
-        duration=duration,
-        thumbnail=meta.get("thumbnail"),
-        view_count=meta.get("view_count"),
-        like_count=meta.get("like_count"),
-    )
+    return _normalize_video_info(url, meta, duration)
 
 
 def download_video(
@@ -292,14 +372,7 @@ def download_video(
             f"Telegram принимает до {MAX_FILE_SIZE_MB} МБ."
         )
 
-    info = VideoInfo(
-        title=meta.get("title", "Без названия"),
-        uploader=meta.get("uploader") or meta.get("channel") or "Неизвестно",
-        duration=duration,
-        thumbnail=meta.get("thumbnail"),
-        view_count=meta.get("view_count"),
-        like_count=meta.get("like_count"),
-    )
+    info = _normalize_video_info(url, meta, duration)
 
     logger.info("Downloaded: %s (%.1f MB, %ds)", downloaded_file, size_mb, duration)
     return DownloadResult(file_path=downloaded_file, info=info)

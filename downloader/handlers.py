@@ -56,7 +56,20 @@ def _format_duration(seconds: int) -> str:
 def _format_count(value: int | None) -> str:
     if value is None:
         return "—"
-    return f"{value:,}".replace(",", " ")
+    if value < 1_000:
+        return str(value)
+    if value < 1_000_000:
+        compact = value / 1_000
+        suffix = "K"
+    elif value < 1_000_000_000:
+        compact = value / 1_000_000
+        suffix = "M"
+    else:
+        compact = value / 1_000_000_000
+        suffix = "B"
+
+    formatted = f"{compact:.1f}".rstrip("0").rstrip(".")
+    return f"{formatted}{suffix}"
 
 
 def _build_video_caption(info) -> str:
