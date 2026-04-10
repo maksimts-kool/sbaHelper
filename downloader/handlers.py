@@ -64,9 +64,9 @@ def _build_video_caption(info) -> str:
     title = html.escape(info.title)
     uploader = html.escape(info.uploader)
     return (
-        f"🎬 <b>{title}</b> - <tg-emoji emoji-id=\"{LENGTH_EMOJI_ID}\"></tg-emoji> {duration_text}\n"
-        f"<tg-emoji emoji-id=\"{VIEWS_EMOJI_ID}\"></tg-emoji> {_format_count(info.view_count)} просмотров\n"
-        f"<tg-emoji emoji-id=\"{LIKES_EMOJI_ID}\"></tg-emoji> {_format_count(info.like_count)} лайков\n"
+        f"🎬 <b>{title}</b> - <tg-emoji emoji-id=\"{LENGTH_EMOJI_ID}\">⏱️</tg-emoji> {duration_text}\n"
+        f"<tg-emoji emoji-id=\"{VIEWS_EMOJI_ID}\">👁️</tg-emoji> {_format_count(info.view_count)} просмотров\n"
+        f"<tg-emoji emoji-id=\"{LIKES_EMOJI_ID}\">❤️</tg-emoji> {_format_count(info.like_count)} лайков\n"
         f"👤 {uploader}"
     )
 
