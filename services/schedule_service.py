@@ -123,13 +123,19 @@ def _generate_and_upload(api, tts, schedules, reason):
 
     with tempfile.TemporaryDirectory() as td:
         fpath = os.path.join(td, "schedule.mp3")
-        if has_bg:
-            tts.synth_with_background(
-                text, fpath,
-                bg_start=BG_START_PATH, bg_mid=BG_MID_PATH, bg_end=BG_END_PATH,
-                fade_ms=BG_FADE_MS,
-            )
-        else:
+        try:
+            if has_bg:
+                tts.synth_with_background(
+                    text, fpath,
+                    bg_start=BG_START_PATH, bg_mid=BG_MID_PATH, bg_end=BG_END_PATH,
+                    fade_ms=BG_FADE_MS,
+                )
+            else:
+                tts.synth(text, fpath)
+        except Exception:
+            if not has_bg:
+                raise
+            logger.exception("[ScheduleService] Background mix failed, retrying without background (%s).", reason)
             tts.synth(text, fpath)
 
         resp = api.upload_file(fpath, "tts_schedule.mp3")

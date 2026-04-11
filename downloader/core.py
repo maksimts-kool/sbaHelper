@@ -5,6 +5,7 @@
 import logging
 import os
 import re
+import time
 import uuid
 from dataclasses import dataclass
 from typing import Callable
@@ -24,6 +25,27 @@ from downloader.config import (
 )
 
 logger = logging.getLogger(__name__)
+
+YTDLP_RETRY_ATTEMPTS = 3
+YTDLP_RETRY_MAX_SLEEP_SEC = 8.0
+_DNS_ERROR_TOKENS = (
+    "name or service not known",
+    "temporary failure in name resolution",
+    "nodename nor servname provided, or not known",
+    "failed to resolve",
+    "getaddrinfo failed",
+)
+_RETRYABLE_YTDLP_ERROR_TOKENS = _DNS_ERROR_TOKENS + (
+    "transporterror",
+    "network is unreachable",
+    "connection reset by peer",
+    "connection aborted",
+    "connection refused",
+    "remote end closed connection without response",
+    "server disconnected",
+    "timed out",
+    "timeout",
+)
 
 SUPPORTED_BROWSER_COOKIE_SOURCES = {
     "brave",
@@ -130,6 +152,48 @@ def _apply_auth_options(ydl_opts: dict) -> None:
         logger.debug("yt-dlp auth options enabled: %s", "; ".join(auth_sources))
     else:
         logger.debug("yt-dlp auth options are not configured.")
+
+
+def _build_ydl_opts(
+    url: str,
+    *,
+    download: bool,
+    output_template: str | None = None,
+    progress_hook: Callable[[dict], None] | None = None,
+) -> dict:
+    ydl_opts: dict = {
+        "quiet": True,
+        "no_warnings": True,
+        "noplaylist": True,
+        "socket_timeout": 30,
+        "retries": YTDLP_RETRY_ATTEMPTS,
+        "extractor_retries": YTDLP_RETRY_ATTEMPTS,
+        "file_access_retries": YTDLP_RETRY_ATTEMPTS,
+    }
+
+    if _is_tiktok_url(url):
+        # Снижает количество сбоев у TikTok extractor на части инсталляций yt-dlp.
+        ydl_opts["extractor_args"] = {"tiktok": {"app_version": ""}}
+
+    if download:
+        if not output_template:
+            raise ValueError("output_template is required when download=True")
+        ydl_opts.update(
+            {
+                "outtmpl": output_template,
+                # Для всех платформ сначала пробуем лучший video+audio до 1080p,
+                # а если контейнер не mp4, ffmpeg потом приведёт результат к mp4.
+                "format": _get_format_selector(url),
+                "merge_output_format": "mp4",
+            }
+        )
+        if progress_hook is not None:
+            ydl_opts["progress_hooks"] = [progress_hook]
+    else:
+        ydl_opts["skip_download"] = True
+
+    _apply_auth_options(ydl_opts)
+    return ydl_opts
 
 
 def _is_facebook_url(url: str) -> bool:
@@ -285,6 +349,12 @@ def _normalize_video_info(url: str, meta: dict, duration: int) -> VideoInfo:
 
 def _rewrite_download_error(url: str, err_msg: str) -> str:
     lower_err = err_msg.lower()
+    if any(token in lower_err for token in _DNS_ERROR_TOKENS):
+        return (
+            "Не удалось обратиться к сайту из-за DNS/сетевой ошибки. "
+            "Бот уже сделал несколько автоматических попыток, но адрес всё ещё не резолвится. "
+            "Проверьте DNS и доступ в интернет у контейнера/сервера."
+        )
     if _is_facebook_url(url) and any(
         token in lower_err
         for token in (
@@ -304,6 +374,41 @@ def _rewrite_download_error(url: str, err_msg: str) -> str:
     return err_msg
 
 
+def _is_retryable_ytdlp_error(err_msg: str) -> bool:
+    lower_err = err_msg.lower()
+    return any(token in lower_err for token in _RETRYABLE_YTDLP_ERROR_TOKENS)
+
+
+def _extract_with_retries(url: str, ydl_opts: dict, *, download: bool) -> dict:
+    action = "download" if download else "metadata fetch"
+
+    for attempt in range(1, YTDLP_RETRY_ATTEMPTS + 1):
+        try:
+            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                return ydl.extract_info(url, download=download)
+        except yt_dlp.utils.DownloadError as e:
+            if attempt >= YTDLP_RETRY_ATTEMPTS:
+                raise
+
+            err_msg = str(e)
+            if not _is_retryable_ytdlp_error(err_msg):
+                raise
+
+            sleep_for = min(2 ** (attempt - 1), YTDLP_RETRY_MAX_SLEEP_SEC)
+            logger.warning(
+                "Transient yt-dlp %s error for %s (attempt %d/%d): %s. Retrying in %.1fs",
+                action,
+                url,
+                attempt,
+                YTDLP_RETRY_ATTEMPTS,
+                err_msg,
+                sleep_for,
+            )
+            time.sleep(sleep_for)
+
+    raise RuntimeError("unreachable")
+
+
 # --------------------------------------------------------------------------- #
 #  Публичный API                                                               #
 # --------------------------------------------------------------------------- #
@@ -314,15 +419,9 @@ def fetch_info(url: str) -> VideoInfo:
     Raises DownloadError при ошибке.
     """
     logger.debug("fetch_info: %s", url)
-    ydl_opts: dict = {
-        "quiet": True,
-        "no_warnings": True,
-        "skip_download": True,
-    }
-    _apply_auth_options(ydl_opts)
+    ydl_opts = _build_ydl_opts(url, download=False)
     try:
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            meta = ydl.extract_info(url, download=False)
+        meta = _extract_with_retries(url, ydl_opts, download=False)
     except yt_dlp.utils.DownloadError as e:
         err_msg = _rewrite_download_error(url, str(e))
         if "unsupported url" in err_msg.lower() and ("/photo/" in url.lower() or "/photo/" in err_msg.lower()):
@@ -377,27 +476,15 @@ def download_video(
                 # Никогда не ломаем yt-dlp из-за ошибки в коллбэке
                 logger.debug("Progress hook error (ignored): %s", hook_err)
 
-    ydl_opts = {
-        "quiet": True,
-        "no_warnings": True,
-        "outtmpl": output_template,
-        # Для всех платформ сначала пробуем лучший video+audio до 1080p,
-        # а если контейнер не mp4, ffmpeg потом приведёт результат к mp4.
-        "format": _get_format_selector(url),
-        "merge_output_format": "mp4",
-        # Не качаем playlist-ы — только одно видео
-        "noplaylist": True,
-        "progress_hooks": [_progress_hook],
-        # Совместимость с TikTok
-        "extractor_args": {"tiktok": {"app_version": ""}},
-        # Ограничиваем время ожидания сокета
-        "socket_timeout": 30,
-    }
-    _apply_auth_options(ydl_opts)
+    ydl_opts = _build_ydl_opts(
+        url,
+        download=True,
+        output_template=output_template,
+        progress_hook=_progress_hook,
+    )
 
     try:
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            meta = ydl.extract_info(url, download=True)
+        meta = _extract_with_retries(url, ydl_opts, download=True)
     except yt_dlp.utils.DownloadError as e:
         raise DownloadError(_rewrite_download_error(url, str(e))) from e
 

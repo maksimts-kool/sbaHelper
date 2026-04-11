@@ -1,24 +1,50 @@
+import asyncio
+import logging
 import os
-import sys
-import subprocess
+
+from tenacity import before_sleep_log, retry, stop_after_attempt, wait_exponential
+
+
+logger = logging.getLogger(__name__)
 
 
 class TTSEngine:
     def __init__(self, voice):
         self.voice = voice
 
+    async def _save_tts(self, text, out_file):
+        import edge_tts
+
+        communicate = edge_tts.Communicate(text=text, voice=self.voice)
+        await communicate.save(out_file)
+
+    @retry(
+        stop=stop_after_attempt(3),
+        wait=wait_exponential(multiplier=1, min=1, max=8),
+        before_sleep=before_sleep_log(logger, logging.WARNING),
+        reraise=True,
+    )
+    def _synthesize_raw_mp3(self, text, out_file):
+        if not text or not text.strip():
+            raise ValueError("TTS text is empty.")
+
+        try:
+            asyncio.run(self._save_tts(text, out_file))
+        except Exception:
+            if os.path.exists(out_file):
+                os.remove(out_file)
+            logger.exception("[TTS] edge_tts synthesis failed for voice '%s'", self.voice)
+            raise
+
+        if not os.path.isfile(out_file) or os.path.getsize(out_file) == 0:
+            raise RuntimeError(f"edge_tts did not create audio file: {out_file}")
+
     def synth(self, text, out_file, add_silence=True):
         from pydub import AudioSegment
 
         temp_mp3 = out_file + ".tmp"
 
-        cmd = [
-            sys.executable, "-m", "edge_tts",
-            "--voice", self.voice,
-            "--text", text,
-            "--write-media", temp_mp3,
-        ]
-        subprocess.check_call(cmd)
+        self._synthesize_raw_mp3(text, temp_mp3)
 
         audio = AudioSegment.from_file(temp_mp3, format="mp3")
         audio = audio + 12  # нормализация громкости
@@ -44,13 +70,7 @@ class TTSEngine:
 
         # 1. Generate raw TTS speech
         temp_mp3 = out_file + ".tmp"
-        cmd = [
-            sys.executable, "-m", "edge_tts",
-            "--voice", self.voice,
-            "--text", text,
-            "--write-media", temp_mp3,
-        ]
-        subprocess.check_call(cmd)
+        self._synthesize_raw_mp3(text, temp_mp3)
 
         speech = AudioSegment.from_file(temp_mp3, format="mp3")
         speech = speech + 12  # normalize volume
