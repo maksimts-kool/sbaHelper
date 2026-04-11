@@ -5,7 +5,7 @@ from dotenv import load_dotenv
 from sentry_sdk import init as sentry_init
 from sentry_sdk.integrations.logging import LoggingIntegration
 
-from monitoring.telegram_errors import is_transient_telegram_error
+from monitoring.telegram_errors import is_transient_telegram_error, is_transient_telegram_error_data
 
 load_dotenv()
 
@@ -15,12 +15,15 @@ def _event_contains_transient_telegram_error(event: dict, hint: dict) -> bool:
     if exc_info and is_transient_telegram_error(exc_info[1]):
         return True
 
+    logger_name = event.get("logger", "")
     values = event.get("exception", {}).get("values", [])
     for value in values:
-        if value.get("type") == "NetworkError" and "Bad Gateway" in value.get("value", ""):
-            logger_name = event.get("logger", "")
-            if logger_name.startswith("telegram"):
-                return True
+        if is_transient_telegram_error_data(
+            type_name=value.get("type"),
+            message=value.get("value"),
+            logger_name=logger_name,
+        ):
+            return True
     return False
 
 
