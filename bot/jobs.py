@@ -100,6 +100,91 @@ def _build_daily_schedule_signature(schedule: list, target_date: date) -> str:
     return json.dumps(normalized, ensure_ascii=False, separators=(',', ':'))
 
 
+def _load_schedule_signature_items(signature: str) -> list[dict[str, object]]:
+    """Восстанавливает нормализованные элементы расписания из сохранённой сигнатуры."""
+    if not signature:
+        return []
+    try:
+        data = json.loads(signature)
+    except (TypeError, ValueError):
+        return []
+    if not isinstance(data, list):
+        return []
+
+    items: list[dict[str, object]] = []
+    for item in data:
+        if not isinstance(item, dict):
+            continue
+        try:
+            items.append({
+                'id': int(item.get('id', 0) or 0),
+                'start': int(item.get('start', 0) or 0),
+                'end': int(item.get('end', 0) or 0),
+                'name': str(item.get('name') or '?'),
+            })
+        except (TypeError, ValueError):
+            continue
+    return items
+
+
+def _merge_daily_schedule_items(
+    current_signature: str,
+    previous_signature: str,
+    now_ts: int,
+) -> str:
+    """
+    Оставляет завершившиеся блоки из уже отправленного дневного расписания
+    и добавляет текущие/будущие блоки из актуального API-ответа.
+    """
+    current_items = _load_schedule_signature_items(current_signature)
+    previous_items = _load_schedule_signature_items(previous_signature)
+
+    merged: dict[tuple[int, int, int, str], dict[str, object]] = {}
+
+    for item in previous_items:
+        if int(item.get('end', 0) or 0) <= now_ts:
+            key = (
+                int(item.get('id', 0) or 0),
+                int(item.get('start', 0) or 0),
+                int(item.get('end', 0) or 0),
+                str(item.get('name') or '?'),
+            )
+            merged[key] = item
+
+    for item in current_items:
+        key = (
+            int(item.get('id', 0) or 0),
+            int(item.get('start', 0) or 0),
+            int(item.get('end', 0) or 0),
+            str(item.get('name') or '?'),
+        )
+        merged[key] = item
+
+    merged_items = sorted(
+        merged.values(),
+        key=lambda x: (
+            int(x.get('start', 0) or 0),
+            int(x.get('end', 0) or 0),
+            int(x.get('id', 0) or 0),
+            str(x.get('name') or '?'),
+        ),
+    )
+    return json.dumps(merged_items, ensure_ascii=False, separators=(',', ':'))
+
+
+def _signature_to_schedule_items(signature: str) -> list[dict[str, object]]:
+    """Преобразует сигнатуру обратно в формат schedule item для formatter'а."""
+    items: list[dict[str, object]] = []
+    for item in _load_schedule_signature_items(signature):
+        items.append({
+            'id': int(item.get('id', 0) or 0),
+            'start_timestamp': int(item.get('start', 0) or 0),
+            'end_timestamp': int(item.get('end', 0) or 0),
+            'name': str(item.get('name') or '?'),
+        })
+    return items
+
+
 async def update_display_job(context: ContextTypes.DEFAULT_TYPE) -> None:
     """Периодически обновляет плеер и очередь во всех активных чатах."""
     data = await get_station_data()
@@ -222,38 +307,94 @@ async def schedule_notify_job(context: ContextTypes.DEFAULT_TYPE) -> None:
 
     tz = pytz.timezone(TZ_NAME)
     target_date = datetime.now(tz).date()
-    schedule_signature = _build_daily_schedule_signature(schedule, target_date)
-    schedule_message = format_daily_schedule_message(schedule, target_date=target_date)
+    now_ts = int(datetime.now(tz).timestamp())
+    current_schedule_signature = _build_daily_schedule_signature(schedule, target_date)
+    effective_schedule_signature = _merge_daily_schedule_items(
+        current_signature=current_schedule_signature,
+        previous_signature=_sched_last_signature if _sched_last_date == today_key else '',
+        now_ts=now_ts,
+    )
+    effective_schedule = _signature_to_schedule_items(effective_schedule_signature)
+    schedule_message = format_daily_schedule_message(effective_schedule, target_date=target_date)
 
     schedule_changed = (
         _sched_last_date != today_key
-        or _sched_last_signature != schedule_signature
+        or _sched_last_signature != effective_schedule_signature
     )
-    missing_chat_keys = set(active_chat_keys) - set(_sched_daily_messages.keys())
+    same_day_refresh = _sched_last_date == today_key
+    text_changed = _sched_last_text != schedule_message
+    existing_messages = dict(_sched_daily_messages)
+    updated_messages = dict(existing_messages)
+    missing_chat_keys = set(active_chat_keys) - set(existing_messages.keys())
 
-    if schedule_changed:
-        missing_chat_keys = set(active_chat_keys)
-        _sched_daily_messages = {}
-    elif not missing_chat_keys:
+    if not schedule_changed and not text_changed and not missing_chat_keys:
         return
 
     for chat_id in list(CHATS_DB.keys()):
         chat_key = str(chat_id)
-        if chat_key not in missing_chat_keys:
-            continue
+        prev_message_id = existing_messages.get(chat_key)
 
         try:
-            sent = await context.bot.send_message(
-                chat_id=chat_id,
-                text=schedule_message,
-                parse_mode='MarkdownV2',
-            )
-            _sched_daily_messages[chat_key] = sent.message_id
+            if schedule_changed:
+                sent = await context.bot.send_message(
+                    chat_id=chat_id,
+                    text=schedule_message,
+                    parse_mode='MarkdownV2',
+                )
+                updated_messages[chat_key] = sent.message_id
+
+                if same_day_refresh and prev_message_id and prev_message_id != sent.message_id:
+                    try:
+                        await context.bot.delete_message(
+                            chat_id=chat_id,
+                            message_id=prev_message_id,
+                        )
+                    except Exception as exc:
+                        logging.warning(
+                            "Schedule notify delete old -> %s: %s",
+                            chat_id,
+                            exc,
+                        )
+                continue
+
+            if chat_key in missing_chat_keys:
+                sent = await context.bot.send_message(
+                    chat_id=chat_id,
+                    text=schedule_message,
+                    parse_mode='MarkdownV2',
+                )
+                updated_messages[chat_key] = sent.message_id
+                continue
+
+            if not text_changed or not prev_message_id:
+                continue
+
+            try:
+                await context.bot.edit_message_text(
+                    chat_id=chat_id,
+                    message_id=prev_message_id,
+                    text=schedule_message,
+                    parse_mode='MarkdownV2',
+                )
+            except BadRequest as exc:
+                error_text = str(exc).lower()
+                if "message is not modified" in error_text:
+                    pass
+                elif "message to edit not found" in error_text:
+                    sent = await context.bot.send_message(
+                        chat_id=chat_id,
+                        text=schedule_message,
+                        parse_mode='MarkdownV2',
+                    )
+                    updated_messages[chat_key] = sent.message_id
+                else:
+                    raise
         except Exception as exc:
             logging.warning(f"Schedule notify -> {chat_id}: {exc}")
 
+    _sched_daily_messages = updated_messages
     _sched_last_date = today_key
-    _sched_last_signature = schedule_signature
+    _sched_last_signature = effective_schedule_signature
     _sched_last_text = schedule_message
     _persist_sched_state()
 
