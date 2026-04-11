@@ -67,24 +67,52 @@ def _normalize_schedule_keys(raw_keys) -> set[tuple[int, int]]:
     return keys
 
 
-def load_schedule_notify_state() -> dict[str, set[tuple[int, int]]]:
+def _normalize_schedule_message_map(raw_messages) -> dict[str, int]:
+    messages: dict[str, int] = {}
+    if not isinstance(raw_messages, dict):
+        return messages
+
+    for chat_id, message_id in raw_messages.items():
+        try:
+            messages[str(chat_id)] = int(message_id)
+        except (TypeError, ValueError):
+            continue
+
+    return messages
+
+
+def load_schedule_notify_state() -> dict[str, object]:
     if os.path.exists(SCHEDULE_NOTIFY_STATE_FILE):
         try:
             with open(SCHEDULE_NOTIFY_STATE_FILE, 'r') as f:
                 data = json.load(f)
             return {
-                'active_keys': _normalize_schedule_keys(data.get('active_keys', [])),
+                'date': str(data.get('date') or ''),
+                'signature': str(data.get('signature') or ''),
+                'text': str(data.get('text') or ''),
+                'messages': _normalize_schedule_message_map(data.get('messages', {})),
             }
         except Exception as e:
             logging.error(f"Error loading schedule notify state: {e}")
-    return {'active_keys': set()}
+    return {
+        'date': '',
+        'signature': '',
+        'text': '',
+        'messages': {},
+    }
 
 
-def save_schedule_notify_state(active_keys: set[tuple[int, int]]) -> None:
+def save_schedule_notify_state(state: dict[str, object]) -> None:
     try:
         _ensure_parent_dir(SCHEDULE_NOTIFY_STATE_FILE)
         payload = {
-            'active_keys': [list(item) for item in sorted(active_keys)],
+            'date': str(state.get('date') or ''),
+            'signature': str(state.get('signature') or ''),
+            'text': str(state.get('text') or ''),
+            'messages': {
+                str(chat_id): int(message_id)
+                for chat_id, message_id in dict(state.get('messages') or {}).items()
+            },
         }
         with open(SCHEDULE_NOTIFY_STATE_FILE, 'w') as f:
             json.dump(payload, f, indent=2)

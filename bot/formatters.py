@@ -2,7 +2,7 @@
 Функции форматирования текста и клавиатуры для сообщений бота.
 """
 import time as time_module
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 
 import pytz
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
@@ -16,6 +16,7 @@ from services.playlist_names import PLAYLIST_NAMES
 _RADIO_SHUTDOWN_DATE = date(2026, 4, 30)
 _RADIO_SHUTDOWN_EMOJI = "![❗️](tg://emoji?id=5274099962655816924)"
 _RADIO_COUNTDOWN_EMOJI = "![⏳](tg://emoji?id=5382194935057372936)"
+_SCHEDULE_CURRENT_EMOJI = "![😀](tg://emoji?id=5929468240668397096)"
 
 
 # --- УТИЛИТЫ ---
@@ -481,6 +482,99 @@ def _sched_same_day(ts1: int, ts2: int) -> bool:
         datetime.fromtimestamp(ts1, tz).date()
         == datetime.fromtimestamp(ts2, tz).date()
     )
+
+
+def _format_daily_schedule_range(start_ts: int, end_ts: int, target_date: date) -> str:
+    """Форматирует диапазон для суточного расписания с учётом перехода через полночь."""
+    tz = pytz.timezone(TZ_NAME)
+    day_start = tz.localize(datetime.combine(target_date, datetime.min.time()))
+    next_day = day_start + timedelta(days=1)
+
+    clipped_start_ts = max(start_ts, int(day_start.timestamp()))
+    start_label = _fmt_sched_time(clipped_start_ts)
+
+    end_dt = datetime.fromtimestamp(end_ts, tz)
+    if end_dt < next_day:
+        return f"{start_label} – {_fmt_sched_time(end_ts)}"
+
+    if end_dt.date() == next_day.date():
+        return f"{start_label} – {_fmt_sched_time(end_ts)} (след. день)"
+
+    return f"{start_label} – {end_dt.strftime('%d.%m %H:%M')}"
+
+
+def format_daily_schedule_message(schedule: list, target_date: date | None = None) -> str:
+    """Форматирует единое MarkdownV2-сообщение с расписанием плейлистов на текущий день."""
+    tz = pytz.timezone(TZ_NAME)
+    target_date = target_date or datetime.now(tz).date()
+    day_start = tz.localize(datetime.combine(target_date, datetime.min.time()))
+    next_day = day_start + timedelta(days=1)
+    day_start_ts = int(day_start.timestamp())
+    next_day_ts = int(next_day.timestamp())
+    now_ts = int(datetime.now(tz).timestamp())
+
+    grouped: dict[tuple[int, int], list[dict]] = {}
+    for item in sorted(
+        schedule or [],
+        key=lambda x: (x.get('start_timestamp', 0), x.get('end_timestamp', 0), x.get('id', 0)),
+    ):
+        if not isinstance(item, dict):
+            continue
+
+        start_ts = int(item.get('start_timestamp', 0) or 0)
+        end_ts = int(item.get('end_timestamp', 0) or 0)
+        if not start_ts or not end_ts:
+            continue
+
+        overlaps_day = start_ts < next_day_ts and end_ts > day_start_ts
+        if not overlaps_day:
+            continue
+
+        grouped.setdefault((start_ts, end_ts), []).append(item)
+
+    date_label = target_date.strftime('%d.%m.%Y')
+    header = f"📅 *Расписание плейлистов на {escape_md_v2(date_label)}*\n━━━━━━━━━━━━━━━━━━"
+
+    if not grouped:
+        return header + "\n" + escape_md_v2("Сегодня запланированных плейлистов нет.")
+
+    full_day_names: list[str] = []
+    timed_groups: list[tuple[tuple[int, int], list[dict]]] = []
+    full_day_threshold_ts = next_day_ts - 60
+
+    for time_range, items in grouped.items():
+        start_ts, end_ts = time_range
+        if start_ts <= day_start_ts and end_ts >= full_day_threshold_ts:
+            for item in items:
+                raw_name = str(item.get('name') or item.get('title') or '?')
+                readable = PLAYLIST_NAMES.get(raw_name.lower(), raw_name)
+                if readable not in full_day_names:
+                    full_day_names.append(readable)
+            continue
+        timed_groups.append((time_range, items))
+
+    lines: list[str] = []
+    if full_day_names:
+        prefix = f"{_SCHEDULE_CURRENT_EMOJI}"
+        lines.append(
+            f"{prefix} *Весь день:* {', '.join(escape_md_v2(name) for name in full_day_names)}"
+        )
+
+    for idx, ((start_ts, end_ts), items) in enumerate(timed_groups, 1):
+        names: list[str] = []
+        seen_names: set[str] = set()
+        for item in items:
+            raw_name = str(item.get('name') or item.get('title') or '?')
+            readable = PLAYLIST_NAMES.get(raw_name.lower(), raw_name)
+            if readable not in seen_names:
+                seen_names.add(readable)
+                names.append(escape_md_v2(readable))
+
+        time_label = _format_daily_schedule_range(start_ts, end_ts, target_date)
+        prefix = f"{_SCHEDULE_CURRENT_EMOJI} " if start_ts <= now_ts < end_ts else ""
+        lines.append(f"{prefix}*{escape_md_v2(time_label)}* — {', '.join(names)}")
+
+    return header + "\n" + "\n".join(lines)
 
 
 def format_schedule_started(

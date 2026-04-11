@@ -1,9 +1,12 @@
 """
 Фоновые задачи бота: обновление плеера, ежедневный отчет и уведомления расписания.
 """
+import json
 import logging
 import time as _time_module
+from datetime import date, datetime, time as dt_time, timedelta
 
+import pytz
 from telegram import InputMediaPhoto
 from telegram.error import BadRequest, NetworkError, TimedOut
 from telegram.ext import ContextTypes
@@ -13,13 +16,11 @@ from bot.api import get_queue_data, get_schedule, get_station_data
 from bot.formatters import (
     clean_track_info,
     escape_md_v2,
+    format_daily_schedule_message,
     format_intervals_text,
     format_main_message,
     format_queue_list,
     format_radio_shutdown_notice,
-    format_schedule_ended,
-    format_schedule_items_summary,
-    format_schedule_started,
     get_keyboard,
 )
 from bot.state import (
@@ -33,26 +34,70 @@ from bot.state import (
     save_schedule_notify_state,
     update_vote_logic,
 )
+from core.config import TZ_NAME
 
 # --- Состояние джобы расписания ---
-# Ключ: (playlist_id, start_timestamp) — уникальный слот расписания.
-# Простой id не подходит: один плейлист может повторяться в разные дни с тем же id.
 _sched_state = load_schedule_notify_state()
-_sched_active_keys: set[tuple[int, int]] = set(_sched_state['active_keys'])
-_sched_active_data: dict[tuple[int, int], dict] = {}
-_sched_initialized: bool = False
-# Последнее уведомление расписания по chat_id: {chat_id: message_id}
-_sched_last_msg: dict[int, int] = {}
-# Ключи блоков, для которых уже отправлено предупреждение «10 минут до конца»
-_sched_warned_10min: set[tuple[int, int]] = set()
+_sched_last_date: str = str(_sched_state.get('date') or '')
+_sched_last_signature: str = str(_sched_state.get('signature') or '')
+_sched_last_text: str = str(_sched_state.get('text') or '')
+_sched_daily_messages: dict[str, int] = {
+    str(chat_id): int(message_id)
+    for chat_id, message_id in dict(_sched_state.get('messages') or {}).items()
+}
 
 
-def _sched_key(item: dict) -> tuple[int, int]:
-    return (item.get('id', 0), item.get('start_timestamp', 0))
+def _today_schedule_key() -> str:
+    tz = pytz.timezone(TZ_NAME)
+    return datetime.now(tz).strftime('%Y-%m-%d')
 
 
 def _persist_sched_state() -> None:
-    save_schedule_notify_state(_sched_active_keys)
+    save_schedule_notify_state({
+        'date': _sched_last_date,
+        'signature': _sched_last_signature,
+        'text': _sched_last_text,
+        'messages': _sched_daily_messages,
+    })
+
+
+def _build_daily_schedule_signature(schedule: list, target_date: date) -> str:
+    """Строит стабильную сигнатуру дневного расписания без учёта текущего времени."""
+    tz = pytz.timezone(TZ_NAME)
+    day_start = tz.localize(datetime.combine(target_date, dt_time.min))
+    next_day = day_start + timedelta(days=1)
+    day_start_ts = int(day_start.timestamp())
+    next_day_ts = int(next_day.timestamp())
+    normalized: list[dict[str, object]] = []
+
+    for item in sorted(
+        schedule or [],
+        key=lambda x: (
+            x.get('start_timestamp', 0),
+            x.get('end_timestamp', 0),
+            x.get('id', 0),
+            str(x.get('name') or x.get('title') or ''),
+        ),
+    ):
+        if not isinstance(item, dict):
+            continue
+
+        start_ts = int(item.get('start_timestamp', 0) or 0)
+        end_ts = int(item.get('end_timestamp', 0) or 0)
+        if not start_ts or not end_ts:
+            continue
+
+        if not (start_ts < next_day_ts and end_ts > day_start_ts):
+            continue
+
+        normalized.append({
+            'id': int(item.get('id', 0) or 0),
+            'start': start_ts,
+            'end': end_ts,
+            'name': str(item.get('name') or item.get('title') or '?'),
+        })
+
+    return json.dumps(normalized, ensure_ascii=False, separators=(',', ':'))
 
 
 async def update_display_job(context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -150,185 +195,67 @@ async def update_display_job(context: ContextTypes.DEFAULT_TYPE) -> None:
 
 async def schedule_notify_job(context: ContextTypes.DEFAULT_TYPE) -> None:
     """
-    Каждую минуту сверяет расписание AzuraCast и отправляет уведомления:
-    — когда начинается запланированный блок;
-    — когда он заканчивается (с информацией о следующем);
-    — совмещённое сообщение при немедленном переходе;
-    — предупреждение за 10 минут до конца блока.
+    Отправляет единое сообщение с расписанием плейлистов на текущий день.
+    В полночь создаёт новое сообщение, а после рестарта восстанавливает состояние
+    и досылает сообщение только если за сегодня его ещё нет.
     """
-    global _sched_active_keys, _sched_active_data, _sched_initialized, _sched_warned_10min
+    global _sched_last_date, _sched_last_signature, _sched_last_text, _sched_daily_messages
 
     if not CHATS_DB:
         return
 
-    schedule = await get_schedule(rows=48)
+    today_key = _today_schedule_key()
+    active_chat_keys = {str(chat_id) for chat_id in CHATS_DB.keys()}
+
+    filtered_messages = {
+        chat_id: message_id
+        for chat_id, message_id in _sched_daily_messages.items()
+        if chat_id in active_chat_keys and message_id
+    }
+    if filtered_messages != _sched_daily_messages:
+        _sched_daily_messages = filtered_messages
+        _persist_sched_state()
+
+    schedule = await get_schedule(rows=200)
     if not schedule or not isinstance(schedule, list):
         return
 
-    now_ts = int(_time_module.time())
+    tz = pytz.timezone(TZ_NAME)
+    target_date = datetime.now(tz).date()
+    schedule_signature = _build_daily_schedule_signature(schedule, target_date)
+    schedule_message = format_daily_schedule_message(schedule, target_date=target_date)
 
-    # Элементы, активные прямо сейчас (ключ — уникальный слот, а не просто playlist id)
-    active_items: dict[tuple[int, int], dict] = {
-        _sched_key(item): item
-        for item in schedule
-        if isinstance(item, dict) and item.get('is_now')
-    }
-    current_active_keys = set(active_items.keys())
-    persisted_active_keys = set(_sched_active_keys)
-
-    # Ближайшие ещё не начавшиеся элементы
-    upcoming = sorted(
-        [
-            item for item in schedule
-            if isinstance(item, dict)
-            and not item.get('is_now')
-            and item.get('start_timestamp', 0) > now_ts
-        ],
-        key=lambda x: x.get('start_timestamp', 0),
+    schedule_changed = (
+        _sched_last_date != today_key
+        or _sched_last_signature != schedule_signature
     )
+    missing_chat_keys = set(active_chat_keys) - set(_sched_daily_messages.keys())
 
-    # Все элементы ближайшего блока (одинаковый start_timestamp)
-    next_items: list = []
-    if upcoming:
-        nearest_start = upcoming[0].get('start_timestamp', 0)
-        next_items = [
-            item for item in upcoming
-            if item.get('start_timestamp', 0) == nearest_start
-        ]
-
-    if not _sched_initialized:
-        _sched_active_keys  = current_active_keys
-        _sched_active_data  = active_items
-        _sched_initialized  = True
-        _persist_sched_state()
-        # После рестарта не дублируем сообщение о том же активном блоке.
-        # Если активный блок уже был сохранён в прошлом запуске, просто продолжаем ждать изменений.
-        if current_active_keys and current_active_keys != persisted_active_keys:
-            groups: dict[tuple[int, int], list] = {}
-            for item in active_items.values():
-                gkey = (
-                    item.get('start_timestamp', 0) // 60,
-                    item.get('end_timestamp', 0) // 60,
-                )
-                groups.setdefault(gkey, []).append(item)
-            for group_items in groups.values():
-                msg = format_schedule_started(group_items)
-                if msg:
-                    for chat_id in list(CHATS_DB.keys()):
-                        try:
-                            await context.bot.send_message(
-                                chat_id=chat_id,
-                                text=msg,
-                                parse_mode='Markdown',
-                            )
-                        except Exception as exc:
-                            logging.warning(f"Schedule notify (init) -> {chat_id}: {exc}")
+    if schedule_changed:
+        missing_chat_keys = set(active_chat_keys)
+        _sched_daily_messages = {}
+    elif not missing_chat_keys:
         return
 
-    newly_started_keys = current_active_keys - _sched_active_keys
-    just_ended_keys    = _sched_active_keys - current_active_keys
-
-    if not newly_started_keys and not just_ended_keys:
-        _sched_active_keys  = current_active_keys
-        _sched_active_data  = active_items
-        return
-
-    newly_started = [active_items[k] for k in newly_started_keys]
-    just_ended    = [
-        _sched_active_data[k]
-        for k in just_ended_keys
-        if k in _sched_active_data
-    ]
-
-    _sched_active_keys  = current_active_keys
-    _sched_active_data  = active_items
-    _persist_sched_state()
-
-    messages: list[str] = []
-
-    if newly_started:
-        # Ищем, не является ли это немедленным переходом
-        is_transition = bool(just_ended) and any(
-            abs(s.get('start_timestamp', 0) - e.get('end_timestamp', 0)) <= 120
-            for s in newly_started
-            for e in just_ended
-        )
-
-        # Группируем новые элементы по временному диапазону (точность ±1 мин)
-        groups: dict[tuple[int, int], list] = {}
-        for item in newly_started:
-            key = (
-                item.get('start_timestamp', 0) // 60,
-                item.get('end_timestamp', 0) // 60,
-            )
-            groups.setdefault(key, []).append(item)
-
-        for group_items in groups.values():
-            msg = format_schedule_started(
-                group_items,
-                just_ended if is_transition else None,
-            )
-            if msg:
-                messages.append(msg)
-    elif just_ended:
-        # Блок(и) завершились, новых нет.
-        # Группируем по (start//60, end//60), чтобы плейлисты с одинаковым временем составляли один блок.
-        ended_groups: dict[tuple[int, int], list] = {}
-        for item in just_ended:
-            ekey = (
-                item.get('start_timestamp', 0) // 60,
-                item.get('end_timestamp', 0) // 60,
-            )
-            ended_groups.setdefault(ekey, []).append(item)
-        for ended_group in ended_groups.values():
-            still = list(active_items.values()) or None
-            msg = format_schedule_ended(ended_group, next_items or None, still)
-            if msg:
-                messages.append(msg)
-
-    # --- 10-minute end-of-block warning ---
-    _WARN_WINDOW_SEC = 10 * 60  # 10 minutes
-    for key, item in active_items.items():
-        end_ts = item.get('end_timestamp', 0)
-        if not end_ts:
+    for chat_id in list(CHATS_DB.keys()):
+        chat_key = str(chat_id)
+        if chat_key not in missing_chat_keys:
             continue
-        secs_left = end_ts - now_ts
-        if 0 < secs_left <= _WARN_WINDOW_SEC and key not in _sched_warned_10min:
-            _sched_warned_10min.add(key)
-            # Build next-block info
-            n_str = ""
-            if next_items:
-                n_str = f"\n⏭ Следующий блок: {format_schedule_items_summary(next_items, range_mode='range')}"
-            cur_names = format_schedule_items_summary(list(active_items.values()))
-            mins_left = int(secs_left // 60) + 1
-            warn_msg = (
-                f"⏰ До конца блока осталось *{mins_left} мин*\n"
-                f"📋 Сейчас: {cur_names}"
-                f"{n_str}"
+
+        try:
+            sent = await context.bot.send_message(
+                chat_id=chat_id,
+                text=schedule_message,
+                parse_mode='MarkdownV2',
             )
-            messages.append(warn_msg)
+            _sched_daily_messages[chat_key] = sent.message_id
+        except Exception as exc:
+            logging.warning(f"Schedule notify -> {chat_id}: {exc}")
 
-    # Clean up warned keys that are no longer active
-    _sched_warned_10min = {k for k in _sched_warned_10min if k in active_items}
-
-    for msg in messages:
-        for chat_id in list(CHATS_DB.keys()):
-            try:
-                # Удаляем предыдущее уведомление расписания
-                prev_id = _sched_last_msg.get(chat_id)
-                if prev_id:
-                    try:
-                        await context.bot.delete_message(chat_id=chat_id, message_id=prev_id)
-                    except Exception:
-                        pass
-                sent = await context.bot.send_message(
-                    chat_id=chat_id,
-                    text=msg,
-                    parse_mode='Markdown',
-                )
-                _sched_last_msg[chat_id] = sent.message_id
-            except Exception as exc:
-                logging.warning(f"Schedule notify -> {chat_id}: {exc}")
+    _sched_last_date = today_key
+    _sched_last_signature = schedule_signature
+    _sched_last_text = schedule_message
+    _persist_sched_state()
 
 
 async def daily_report_job(context: ContextTypes.DEFAULT_TYPE) -> None:

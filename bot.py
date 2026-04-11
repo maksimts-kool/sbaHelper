@@ -119,7 +119,7 @@ if __name__ == "__main__":
 
     midnight = time(hour=0, minute=0, second=0, tzinfo=pytz.timezone(TZ_NAME))
     jq.run_daily(daily_report_job, time=midnight, job_kwargs={'misfire_grace_time': 60})
-
+    jq.run_daily(schedule_notify_job, time=midnight, job_kwargs={'misfire_grace_time': 60})
     jq.run_repeating(
         schedule_notify_job,
         interval=60,
