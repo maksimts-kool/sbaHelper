@@ -106,6 +106,7 @@ if __name__ == "__main__":
             "• <code>https://youtube.com/shorts/...</code>\n"
             "• <code>https://www.facebook.com/watch/?v=...</code>\n"
             "• <code>https://www.facebook.com/reel/...</code>\n"
+            "• <code>https://www.facebook.com/.../videos/...</code>\n"
             "• <code>https://fb.watch/...</code>\n\n"
             "Максимальная длительность — 5 мин, размер файла — до 50 МБ.",
             parse_mode="HTML",

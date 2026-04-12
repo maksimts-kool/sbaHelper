@@ -2,7 +2,6 @@
 Конфигурация сервиса загрузки видео.
 """
 import os
-import re
 
 from dotenv import load_dotenv
 
@@ -42,12 +41,3 @@ _allowed_raw = os.getenv("ALLOWED_CHAT_IDS", "")
 ALLOWED_CHAT_IDS: set[int] = {
     int(cid.strip()) for cid in _allowed_raw.split(",") if cid.strip().lstrip("-").isdigit()
 }
-
-# --- Поддерживаемые URL ---
-SUPPORTED_URL_PATTERNS: list[re.Pattern] = [
-    re.compile(r"https?://vm\.tiktok\.com/\S+", re.IGNORECASE),
-    re.compile(r"https?://(www\.)?tiktok\.com/\S+", re.IGNORECASE),
-    re.compile(r"https?://(www\.)?youtube\.com/shorts/\S+", re.IGNORECASE),
-    re.compile(r"https?://(?:www\.|m\.|mbasic\.)?facebook\.com/\S+", re.IGNORECASE),
-    re.compile(r"https?://fb\.watch/\S+", re.IGNORECASE),
-]

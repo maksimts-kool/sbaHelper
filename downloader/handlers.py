@@ -14,7 +14,7 @@ from telegram.constants import ChatAction
 from telegram.error import TelegramError
 from telegram.ext import ContextTypes
 
-from downloader.config import ALLOWED_CHAT_IDS, SUPPORTED_URL_PATTERNS
+from downloader.config import ALLOWED_CHAT_IDS
 from downloader.core import (
     DownloadError,
     DownloadResult,
@@ -25,6 +25,7 @@ from downloader.core import (
     download_video,
     fetch_info,
 )
+from downloader.url_support import extract_supported_url
 
 logger = logging.getLogger(__name__)
 
@@ -39,15 +40,6 @@ LIKES_EMOJI_ID = "5337080053119336309"
 # --------------------------------------------------------------------------- #
 #  Вспомогательные функции                                                     #
 # --------------------------------------------------------------------------- #
-
-def _extract_url(text: str) -> str | None:
-    """Возвращает первую поддерживаемую ссылку из текста, или None."""
-    for pattern in SUPPORTED_URL_PATTERNS:
-        m = pattern.search(text)
-        if m:
-            return m.group(0).rstrip(".,);")  # убираем лишние символы конца
-    return None
-
 
 def _format_duration(seconds: int) -> str:
     m, s = divmod(seconds, 60)
@@ -173,7 +165,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         return
 
     text = message.text or message.caption or ""
-    url = _extract_url(text)
+    url = extract_supported_url(text)
     if not url:
         logger.debug("No supported URL in message from %s in %s", user_label, chat_label)
         return
