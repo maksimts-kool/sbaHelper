@@ -67,13 +67,12 @@ class TTSEngine:
         bg_mid,
         bg_end,
         fade_ms=2500,
-        bg_mid_duck_db=15,
+        bg_edge_gain_db=0,
     ):
         """
         Generate TTS with dynamic background music.
         Structure: bg_start (fade into bg_mid loop under speech) fade into bg_end.
-        Audio files are pre-mixed by the user — no volume adjustments on bg files.
-        Only the mid section is lowered so speech stays clear.
+        Start/end accents can be boosted, while the mid section is lowered so speech stays clear.
         """
         from pydub import AudioSegment
 
@@ -92,6 +91,10 @@ class TTSEngine:
         snd_mid = AudioSegment.from_file(bg_mid, format="mp3")
         snd_end = AudioSegment.from_file(bg_end, format="mp3")
 
+        if bg_edge_gain_db:
+            snd_start = snd_start + bg_edge_gain_db
+            snd_end = snd_end + bg_edge_gain_db
+
         # 3. Build background track
         speech_duration = len(speech)
         mid_needed = speech_duration + fade_ms
@@ -102,9 +105,8 @@ class TTSEngine:
             mid_track = mid_track + snd_mid
         mid_track = mid_track[:mid_needed]
 
-        # Lower only the mid section so speech is audible over it.
-        # Smaller ducking value means louder background under the voice.
-        mid_track = mid_track - bg_mid_duck_db
+        # Keep the original mid ducking so speech stays clear.
+        mid_track = mid_track - 15
 
         # Assemble: start -> crossfade -> mid_loop -> crossfade -> end
         end_crossfade = min(fade_ms, len(mid_track), len(snd_end))

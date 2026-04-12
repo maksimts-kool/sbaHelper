@@ -20,7 +20,7 @@ from core.config import (
     BG_MID_PATH,
     BG_END_PATH,
     BG_FADE_MS,
-    BG_MID_DUCK_DB,
+    BG_EDGE_GAIN_DB,
 )
 from services.playlist_names import PLAYLIST_NAMES
 
@@ -130,7 +130,7 @@ def _generate_and_upload(api, tts, schedules, reason):
                     text, fpath,
                     bg_start=BG_START_PATH, bg_mid=BG_MID_PATH, bg_end=BG_END_PATH,
                     fade_ms=BG_FADE_MS,
-                    bg_mid_duck_db=BG_MID_DUCK_DB,
+                    bg_edge_gain_db=BG_EDGE_GAIN_DB,
                 )
             else:
                 tts.synth(text, fpath)
