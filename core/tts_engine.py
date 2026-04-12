@@ -59,7 +59,16 @@ class TTSEngine:
         if os.path.exists(temp_mp3):
             os.remove(temp_mp3)
 
-    def synth_with_background(self, text, out_file, bg_start, bg_mid, bg_end, fade_ms=2500):
+    def synth_with_background(
+        self,
+        text,
+        out_file,
+        bg_start,
+        bg_mid,
+        bg_end,
+        fade_ms=2500,
+        bg_mid_duck_db=15,
+    ):
         """
         Generate TTS with dynamic background music.
         Structure: bg_start (fade into bg_mid loop under speech) fade into bg_end.
@@ -93,8 +102,9 @@ class TTSEngine:
             mid_track = mid_track + snd_mid
         mid_track = mid_track[:mid_needed]
 
-        # Lower only the mid section so speech is audible over it
-        mid_track = mid_track - 15
+        # Lower only the mid section so speech is audible over it.
+        # Smaller ducking value means louder background under the voice.
+        mid_track = mid_track - bg_mid_duck_db
 
         # Assemble: start -> crossfade -> mid_loop -> crossfade -> end
         end_crossfade = min(fade_ms, len(mid_track), len(snd_end))

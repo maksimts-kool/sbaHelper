@@ -32,6 +32,7 @@ BG_START_PATH = os.getenv("BG_START_PATH", os.path.join("assets", "bg_start.mp3"
 BG_MID_PATH = os.getenv("BG_MID_PATH", os.path.join("assets", "bg_mid.mp3"))
 BG_END_PATH = os.getenv("BG_END_PATH", os.path.join("assets", "bg_end.mp3"))
 BG_FADE_MS = int(os.getenv("BG_FADE_MS", "2500"))
+BG_MID_DUCK_DB = int(os.getenv("BG_MID_DUCK_DB", "9"))
 
 # --- Ссылки ---
 STREAM_URL = "https://radio.maksimtsikvasvili24.thkit.ee/listen/sbaradio/radio.mp3"
