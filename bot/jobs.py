@@ -1,10 +1,13 @@
 """
 Фоновые задачи бота: обновление плеера, ежедневный отчет и уведомления расписания.
 """
+import asyncio
 import json
 import logging
+import os
 import time as _time_module
 from datetime import date, datetime, time as dt_time, timedelta
+from pathlib import Path
 
 import pytz
 from telegram import InputMediaPhoto
@@ -12,15 +15,23 @@ from telegram.error import BadRequest, NetworkError, TimedOut
 from telegram.ext import ContextTypes
 
 from analytics import engine as analytics_engine
-from bot.api import get_queue_data, get_schedule, get_station_data
+from bot.api import (
+    close_api_client,
+    get_queue_data,
+    get_schedule,
+    get_station_data,
+    stop_station_component,
+)
 from bot.formatters import (
     clean_track_info,
     escape_md_v2,
     format_daily_schedule_message,
     format_intervals_text,
     format_main_message,
+    format_radio_farewell_message,
     format_queue_list,
     format_radio_shutdown_notice,
+    get_radio_shutdown_date,
     get_keyboard,
 )
 from bot.state import (
@@ -29,12 +40,22 @@ from bot.state import (
     VOTE_STATE,
     add_recent_song,
     get_song_votes,
+    is_radio_decommissioned,
+    load_farewell_notice_state,
     load_schedule_notify_state,
     save_chats,
+    save_farewell_notice_state,
+    save_radio_decommission_state,
     save_schedule_notify_state,
     update_vote_logic,
 )
-from core.config import TZ_NAME
+from core.config import (
+    CHATS_FILE,
+    FAREWELL_NOTICE_STATE_FILE,
+    SCHEDULE_NOTIFY_STATE_FILE,
+    TZ_NAME,
+    UPVOTES_FILE,
+)
 
 # --- Состояние джобы расписания ---
 _sched_state = load_schedule_notify_state()
@@ -45,6 +66,39 @@ _sched_daily_messages: dict[str, int] = {
     str(chat_id): int(message_id)
     for chat_id, message_id in dict(_sched_state.get('messages') or {}).items()
 }
+
+# --- Состояние финального сообщения ---
+_farewell_state = load_farewell_notice_state()
+_farewell_sent_date: str = str(_farewell_state.get('date') or '')
+_farewell_messages: dict[str, int] = {
+    str(chat_id): int(message_id)
+    for chat_id, message_id in dict(_farewell_state.get('messages') or {}).items()
+}
+_FAREWELL_SEND_TIME = dt_time(hour=9, minute=0)
+
+# --- Состояние демонтажа радио ---
+_RADIO_DECOMMISSION_TIME = dt_time(hour=23, minute=55)
+_radio_decommission_active = False
+_RADIO_JOBS_TO_REMOVE = (
+    "update_display",
+    "daily_report",
+    "schedule_notify_daily",
+    "schedule_notify_refresh",
+    "farewell_notice",
+    "heartbeat",
+)
+_RADIO_RUNTIME_FILES = (
+    CHATS_FILE,
+    SCHEDULE_NOTIFY_STATE_FILE,
+    FAREWELL_NOTICE_STATE_FILE,
+    UPVOTES_FILE,
+    os.path.join("bot_data", "stats_daily.json"),
+    os.path.join("bot_data", "stats_history.json"),
+    os.path.join("runtime", "monitoring", "sbaradio-bot.json"),
+    os.path.join("runtime", "monitoring", "sbaradio-tts.json"),
+    os.path.join("runtime", "logs", "sbaradio-bot.log"),
+    os.path.join("runtime", "logs", "sbaradio-tts.log"),
+)
 
 
 def _today_schedule_key() -> str:
@@ -59,6 +113,97 @@ def _persist_sched_state() -> None:
         'text': _sched_last_text,
         'messages': _sched_daily_messages,
     })
+
+
+def _persist_farewell_state() -> None:
+    save_farewell_notice_state({
+        'date': _farewell_sent_date,
+        'messages': _farewell_messages,
+    })
+
+
+def _radio_jobs_disabled() -> bool:
+    return _radio_decommission_active or is_radio_decommissioned()
+
+
+def _format_decommission_status(steps: list[tuple[str, str]], note: str = "") -> str:
+    icons = {
+        "pending": "▫️",
+        "running": "⏳",
+        "done": "✅",
+        "warn": "⚠️",
+        "failed": "❌",
+    }
+    lines = [
+        "🧹 Закрытие SBA Radio",
+        "━━━━━━━━━━━━━━━━━━",
+        "Показываю статус удаления radio-части. Downloader bot не трогаю.",
+        "",
+    ]
+    lines.extend(f"{icons.get(status, '▫️')} {text}" for text, status in steps)
+    if note:
+        lines.extend(["", note])
+    return "\n".join(lines)
+
+
+async def _edit_decommission_status(
+    context: ContextTypes.DEFAULT_TYPE,
+    status_messages: dict[str, int],
+    steps: list[tuple[str, str]],
+    note: str = "",
+) -> None:
+    text = _format_decommission_status(steps, note=note)
+    for chat_id, message_id in list(status_messages.items()):
+        try:
+            await context.bot.edit_message_text(
+                chat_id=chat_id,
+                message_id=message_id,
+                text=text,
+            )
+        except BadRequest as exc:
+            if "message is not modified" not in str(exc).lower():
+                logging.warning("Decommission status edit -> %s: %s", chat_id, exc)
+        except Exception as exc:
+            logging.warning("Decommission status edit -> %s: %s", chat_id, exc)
+
+
+async def _stop_application_soon(application, delay: float = 3.0) -> None:
+    await asyncio.sleep(delay)
+    stop_running = getattr(application, "stop_running", None)
+    if callable(stop_running):
+        stop_running()
+        return
+    os._exit(0)
+
+
+def _set_step(
+    steps: list[tuple[str, str]],
+    index: int,
+    status: str,
+    text: str | None = None,
+) -> None:
+    current_text, _ = steps[index]
+    steps[index] = (text or current_text, status)
+
+
+def _remove_radio_jobs(context: ContextTypes.DEFAULT_TYPE) -> int:
+    removed = 0
+    for job_name in _RADIO_JOBS_TO_REMOVE:
+        for job in context.job_queue.get_jobs_by_name(job_name):
+            job.schedule_removal()
+            removed += 1
+    return removed
+
+
+def _delete_file_if_exists(path: str) -> tuple[bool, str]:
+    try:
+        target = Path(path)
+        if not target.exists():
+            return True, "missing"
+        target.unlink()
+        return True, "deleted"
+    except Exception as exc:
+        return False, str(exc)
 
 
 def _build_daily_schedule_signature(schedule: list, target_date: date) -> str:
@@ -187,6 +332,9 @@ def _signature_to_schedule_items(signature: str) -> list[dict[str, object]]:
 
 async def update_display_job(context: ContextTypes.DEFAULT_TYPE) -> None:
     """Периодически обновляет плеер и очередь во всех активных чатах."""
+    if _radio_jobs_disabled():
+        return
+
     data = await get_station_data()
     if not data:
         return
@@ -285,6 +433,9 @@ async def schedule_notify_job(context: ContextTypes.DEFAULT_TYPE) -> None:
     и досылает сообщение только если за сегодня его ещё нет.
     """
     global _sched_last_date, _sched_last_signature, _sched_last_text, _sched_daily_messages
+
+    if _radio_jobs_disabled():
+        return
 
     if not CHATS_DB:
         return
@@ -399,8 +550,226 @@ async def schedule_notify_job(context: ContextTypes.DEFAULT_TYPE) -> None:
     _persist_sched_state()
 
 
+async def farewell_notice_job(context: ContextTypes.DEFAULT_TYPE) -> None:
+    """В день закрытия радио отправляет финальное сообщение во все активные чаты."""
+    global _farewell_sent_date, _farewell_messages
+
+    if _radio_jobs_disabled():
+        return
+
+    if not CHATS_DB:
+        return
+
+    tz = pytz.timezone(TZ_NAME)
+    now = datetime.now(tz)
+    shutdown_date = get_radio_shutdown_date()
+    if now.date() != shutdown_date or now.time() < _FAREWELL_SEND_TIME:
+        return
+
+    date_key = shutdown_date.isoformat()
+    if _farewell_sent_date != date_key:
+        _farewell_sent_date = date_key
+        _farewell_messages = {}
+
+    active_chat_keys = {str(chat_id) for chat_id in CHATS_DB.keys()}
+    filtered_messages = {
+        chat_id: message_id
+        for chat_id, message_id in _farewell_messages.items()
+        if chat_id in active_chat_keys and message_id
+    }
+    if filtered_messages != _farewell_messages:
+        _farewell_messages = filtered_messages
+        _persist_farewell_state()
+
+    missing_chat_ids = [
+        chat_id
+        for chat_id in CHATS_DB.keys()
+        if str(chat_id) not in _farewell_messages
+    ]
+    if not missing_chat_ids:
+        return
+
+    msg = format_radio_farewell_message()
+    for chat_id in missing_chat_ids:
+        try:
+            sent = await context.bot.send_message(
+                chat_id=chat_id,
+                text=msg,
+                parse_mode='MarkdownV2',
+            )
+            _farewell_messages[str(chat_id)] = sent.message_id
+            _persist_farewell_state()
+            logging.info(f"Farewell notice sent to {chat_id}")
+        except Exception as e:
+            logging.error(f"Failed to send farewell notice to {chat_id}: {e}")
+
+    _persist_farewell_state()
+
+
+async def radio_decommission_job(context: ContextTypes.DEFAULT_TYPE) -> None:
+    """В конце дня закрытия отключает и очищает radio-часть проекта."""
+    global _radio_decommission_active
+    global _sched_daily_messages, _sched_last_date, _sched_last_signature, _sched_last_text
+    global _farewell_messages, _farewell_sent_date
+
+    if _radio_decommission_active or is_radio_decommissioned():
+        return
+
+    tz = pytz.timezone(TZ_NAME)
+    now = datetime.now(tz)
+    shutdown_date = get_radio_shutdown_date()
+    if now.date() != shutdown_date or now.time() < _RADIO_DECOMMISSION_TIME:
+        return
+
+    _radio_decommission_active = True
+    completed_at = now.isoformat()
+    status_messages: dict[str, int] = {}
+    steps = [
+        ("Остановить фоновые задачи радио", "pending"),
+        ("Удалить старые Telegram-сообщения плеера и расписания", "pending"),
+        ("Остановить AzuraCast backend/frontend", "pending"),
+        ("Закрыть API-соединение с радио", "pending"),
+        ("Удалить локальные radio-state файлы", "pending"),
+        ("Оставить рабочим только downloader bot", "pending"),
+    ]
+
+    try:
+        for chat_id in list(CHATS_DB.keys()):
+            try:
+                sent = await context.bot.send_message(
+                    chat_id=chat_id,
+                    text=_format_decommission_status(steps),
+                )
+                status_messages[str(chat_id)] = sent.message_id
+            except Exception as exc:
+                logging.warning("Decommission status send -> %s: %s", chat_id, exc)
+
+        _set_step(steps, 0, "running")
+        await _edit_decommission_status(context, status_messages, steps)
+        removed_jobs = _remove_radio_jobs(context)
+        _set_step(steps, 0, "done", f"Фоновые задачи радио остановлены ({removed_jobs})")
+        await _edit_decommission_status(context, status_messages, steps)
+
+        _set_step(steps, 1, "running")
+        await _edit_decommission_status(context, status_messages, steps)
+        deleted_messages = 0
+        telegram_delete_errors = 0
+        telegram_targets: list[tuple[str, int]] = []
+        for chat_id, msg_ids in list(CHATS_DB.items()):
+            if not isinstance(msg_ids, dict):
+                continue
+            for key in ("main", "queue"):
+                message_id = msg_ids.get(key)
+                if message_id:
+                    telegram_targets.append((str(chat_id), int(message_id)))
+
+        for chat_id, message_id in _sched_daily_messages.items():
+            telegram_targets.append((str(chat_id), int(message_id)))
+
+        for chat_id, message_id in telegram_targets:
+            if status_messages.get(str(chat_id)) == message_id:
+                continue
+            try:
+                await context.bot.delete_message(chat_id=chat_id, message_id=message_id)
+                deleted_messages += 1
+            except Exception:
+                telegram_delete_errors += 1
+
+        step_text = f"Старые Telegram-сообщения удалены ({deleted_messages})"
+        if telegram_delete_errors:
+            step_text += f", ошибок: {telegram_delete_errors}"
+        _set_step(steps, 1, "done" if not telegram_delete_errors else "warn", step_text)
+        await _edit_decommission_status(context, status_messages, steps)
+
+        _set_step(steps, 2, "running")
+        await _edit_decommission_status(context, status_messages, steps)
+        stop_results = []
+        for component in ("frontend", "backend"):
+            ok, result = await stop_station_component(component)
+            stop_results.append((component, ok, result))
+        failed_stops = [
+            f"{component}: {result}"
+            for component, ok, result in stop_results
+            if not ok
+        ]
+        if failed_stops:
+            _set_step(
+                steps,
+                2,
+                "warn",
+                "AzuraCast stop завершен с предупреждениями: " + "; ".join(failed_stops),
+            )
+        else:
+            _set_step(steps, 2, "done", "AzuraCast backend/frontend остановлены")
+        await _edit_decommission_status(context, status_messages, steps)
+
+        _set_step(steps, 3, "running")
+        await _edit_decommission_status(context, status_messages, steps)
+        await close_api_client()
+        _set_step(steps, 3, "done", "API-соединение с радио закрыто")
+        await _edit_decommission_status(context, status_messages, steps)
+
+        _set_step(steps, 4, "running")
+        await _edit_decommission_status(context, status_messages, steps)
+        CHATS_DB.clear()
+        LAST_MSG_STATE.clear()
+        VOTE_STATE['song_id'] = None
+        VOTE_STATE['voters'].clear()
+        _sched_daily_messages = {}
+        _sched_last_date = ''
+        _sched_last_signature = ''
+        _sched_last_text = ''
+        _farewell_messages = {}
+        _farewell_sent_date = ''
+        save_chats(CHATS_DB)
+
+        deleted_files = 0
+        file_delete_errors: list[str] = []
+        for path in _RADIO_RUNTIME_FILES:
+            ok, result = _delete_file_if_exists(path)
+            if ok and result == "deleted":
+                deleted_files += 1
+            elif not ok:
+                file_delete_errors.append(f"{path}: {result}")
+
+        if file_delete_errors:
+            _set_step(
+                steps,
+                4,
+                "warn",
+                f"Локальные radio-state файлы удалены частично ({deleted_files})",
+            )
+            logging.warning("Radio decommission file cleanup warnings: %s", file_delete_errors)
+        else:
+            _set_step(steps, 4, "done", f"Локальные radio-state файлы удалены ({deleted_files})")
+        await _edit_decommission_status(context, status_messages, steps)
+
+        _set_step(steps, 5, "running")
+        await _edit_decommission_status(context, status_messages, steps)
+        save_radio_decommission_state({
+            'completed': True,
+            'completed_at': completed_at,
+        })
+        for job in context.job_queue.get_jobs_by_name("radio_decommission"):
+            job.schedule_removal()
+        _set_step(steps, 5, "done", "Downloader bot оставлен без изменений")
+        await _edit_decommission_status(
+            context,
+            status_messages,
+            steps,
+            note="Готово. Radio-часть отключена и очищена.",
+        )
+        context.application.create_task(_stop_application_soon(context.application))
+        logging.info("Radio decommission completed at %s", completed_at)
+    finally:
+        _radio_decommission_active = False
+
+
 async def daily_report_job(context: ContextTypes.DEFAULT_TYPE) -> None:
     """В полночь отправляет итоги дня во все активные чаты."""
+    if _radio_jobs_disabled():
+        return
+
     logging.info("Starting daily report job...")
 
     if not CHATS_DB:

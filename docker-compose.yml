@@ -2,8 +2,9 @@ services:
   sbaradio-tts:
     build: .
     container_name: sbaradio-tts
-    restart: unless-stopped
+    restart: on-failure
     volumes:
+      - ./bot_data:/app/bot_data # общий флаг деактивации радио
       - ./runtime:/app/runtime
     environment:
       AZURACAST_HOST: ${AZURACAST_HOST:-}
@@ -24,7 +25,7 @@ services:
   sbaradio-bot:
     build: .
     container_name: sbaradio-bot
-    restart: unless-stopped
+    restart: on-failure
     # Используем тот же образ, но запускаем другой скрипт
     command: [ "python", "bot.py" ]
     volumes:

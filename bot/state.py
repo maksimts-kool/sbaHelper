@@ -12,7 +12,14 @@ from datetime import datetime
 
 import pytz
 
-from core.config import CHATS_FILE, SCHEDULE_NOTIFY_STATE_FILE, TZ_NAME, UPVOTES_FILE
+from core.config import (
+    CHATS_FILE,
+    FAREWELL_NOTICE_STATE_FILE,
+    RADIO_DECOMMISSION_STATE_FILE,
+    SCHEDULE_NOTIFY_STATE_FILE,
+    TZ_NAME,
+    UPVOTES_FILE,
+)
 
 # --- ГОЛОСОВАНИЕ ---
 VOTE_STATE: dict = {
@@ -118,6 +125,73 @@ def save_schedule_notify_state(state: dict[str, object]) -> None:
             json.dump(payload, f, indent=2)
     except Exception as e:
         logging.error(f"Error saving schedule notify state: {e}")
+
+
+def load_farewell_notice_state() -> dict[str, object]:
+    if os.path.exists(FAREWELL_NOTICE_STATE_FILE):
+        try:
+            with open(FAREWELL_NOTICE_STATE_FILE, 'r') as f:
+                data = json.load(f)
+            return {
+                'date': str(data.get('date') or ''),
+                'messages': _normalize_schedule_message_map(data.get('messages', {})),
+            }
+        except Exception as e:
+            logging.error(f"Error loading farewell notice state: {e}")
+    return {
+        'date': '',
+        'messages': {},
+    }
+
+
+def save_farewell_notice_state(state: dict[str, object]) -> None:
+    try:
+        _ensure_parent_dir(FAREWELL_NOTICE_STATE_FILE)
+        payload = {
+            'date': str(state.get('date') or ''),
+            'messages': {
+                str(chat_id): int(message_id)
+                for chat_id, message_id in dict(state.get('messages') or {}).items()
+            },
+        }
+        with open(FAREWELL_NOTICE_STATE_FILE, 'w') as f:
+            json.dump(payload, f, indent=2)
+    except Exception as e:
+        logging.error(f"Error saving farewell notice state: {e}")
+
+
+def load_radio_decommission_state() -> dict[str, object]:
+    if os.path.exists(RADIO_DECOMMISSION_STATE_FILE):
+        try:
+            with open(RADIO_DECOMMISSION_STATE_FILE, 'r') as f:
+                data = json.load(f)
+            return {
+                'completed': bool(data.get('completed')),
+                'completed_at': str(data.get('completed_at') or ''),
+            }
+        except Exception as e:
+            logging.error(f"Error loading radio decommission state: {e}")
+    return {
+        'completed': False,
+        'completed_at': '',
+    }
+
+
+def save_radio_decommission_state(state: dict[str, object]) -> None:
+    try:
+        _ensure_parent_dir(RADIO_DECOMMISSION_STATE_FILE)
+        payload = {
+            'completed': bool(state.get('completed')),
+            'completed_at': str(state.get('completed_at') or ''),
+        }
+        with open(RADIO_DECOMMISSION_STATE_FILE, 'w') as f:
+            json.dump(payload, f, indent=2)
+    except Exception as e:
+        logging.error(f"Error saving radio decommission state: {e}")
+
+
+def is_radio_decommissioned() -> bool:
+    return bool(load_radio_decommission_state().get('completed'))
 
 
 CHATS_DB: dict = load_chats()

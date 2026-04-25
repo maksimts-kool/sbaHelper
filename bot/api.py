@@ -110,6 +110,27 @@ async def skip_song_api() -> tuple[bool, str]:
         return False, str(e)
 
 
+async def stop_station_component(component: str) -> tuple[bool, str]:
+    """Останавливает компонент станции AzuraCast: backend или frontend."""
+    if component not in {"backend", "frontend"}:
+        return False, "Unknown station component"
+
+    url = f"{AZURACAST_HOST}/api/station/{STATION_ID}/{component}/stop"
+    try:
+        await _request("POST", url)
+        return True, "stopped"
+    except httpx.HTTPStatusError as e:
+        logger.error(
+            "API Error (Stop %s): status=%s",
+            component,
+            e.response.status_code,
+        )
+        return False, f"HTTP {e.response.status_code}"
+    except httpx.HTTPError as e:
+        logger.error("API Error (Stop %s): %s", component, e)
+        return False, str(e)
+
+
 async def get_playlist_info(playlist_id: int) -> dict | None:
     """Получает информацию о плейлисте по ID."""
     url = f"{AZURACAST_HOST}/api/station/{STATION_ID}/playlist/{playlist_id}"

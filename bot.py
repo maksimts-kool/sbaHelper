@@ -14,8 +14,14 @@ from telegram.request import HTTPXRequest
 
 from bot.api import close_api_client, get_station_history
 from bot.handlers import announcement_command, button_callback, changelog_dm_handler, start, votes_command
-from bot.jobs import daily_report_job, schedule_notify_job, update_display_job
-from bot.state import CHATS_DB, add_recent_song
+from bot.jobs import (
+    daily_report_job,
+    farewell_notice_job,
+    radio_decommission_job,
+    schedule_notify_job,
+    update_display_job,
+)
+from bot.state import CHATS_DB, add_recent_song, is_radio_decommissioned
 from core.config import TELEGRAM_TOKEN, TZ_NAME
 from monitoring.logging_utils import configure_logging
 from monitoring.runtime import HeartbeatMonitor
@@ -31,6 +37,10 @@ monitor = HeartbeatMonitor("sbaradio-bot")
 if __name__ == "__main__":
     if not TELEGRAM_TOKEN:
         exit(1)
+
+    if is_radio_decommissioned():
+        logger.info("Radio bot is decommissioned. Downloader bot remains the only active bot.")
+        exit(0)
 
     BOT_COMMANDS = [
         BotCommand("start",        "📻 Открыть радио-плеер"),
@@ -55,7 +65,13 @@ if __name__ == "__main__":
         monitor.beat(status="running", active_chats=len(CHATS_DB), bot_username=me.username)
 
     async def post_shutdown(app):
-        monitor.stop(active_chats=len(CHATS_DB))
+        if is_radio_decommissioned():
+            try:
+                monitor.file_path.unlink(missing_ok=True)
+            except Exception:
+                logger.debug("Failed to remove decommissioned radio monitor file", exc_info=True)
+        else:
+            monitor.stop(active_chats=len(CHATS_DB))
         await close_api_client()
 
     async def heartbeat_job(context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -114,23 +130,50 @@ if __name__ == "__main__":
         update_display_job,
         interval=30,
         first=10,
+        name="update_display",
         job_kwargs={'misfire_grace_time': 20, 'max_instances': 3},
     )
 
     midnight = time(hour=0, minute=0, second=0, tzinfo=pytz.timezone(TZ_NAME))
-    jq.run_daily(daily_report_job, time=midnight, job_kwargs={'misfire_grace_time': 60})
-    jq.run_daily(schedule_notify_job, time=midnight, job_kwargs={'misfire_grace_time': 60})
+    jq.run_daily(
+        daily_report_job,
+        time=midnight,
+        name="daily_report",
+        job_kwargs={'misfire_grace_time': 60},
+    )
+    jq.run_daily(
+        schedule_notify_job,
+        time=midnight,
+        name="schedule_notify_daily",
+        job_kwargs={'misfire_grace_time': 60},
+    )
     jq.run_repeating(
         schedule_notify_job,
         interval=60,
         first=15,
+        name="schedule_notify_refresh",
         job_kwargs={'misfire_grace_time': 30, 'max_instances': 1},
+    )
+    jq.run_repeating(
+        farewell_notice_job,
+        interval=600,
+        first=20,
+        name="farewell_notice",
+        job_kwargs={'misfire_grace_time': 60, 'max_instances': 1},
+    )
+    jq.run_repeating(
+        radio_decommission_job,
+        interval=60,
+        first=30,
+        name="radio_decommission",
+        job_kwargs={'misfire_grace_time': 60, 'max_instances': 1},
     )
 
     jq.run_repeating(
         heartbeat_job,
         interval=60,
         first=5,
+        name="heartbeat",
         job_kwargs={'misfire_grace_time': 30, 'max_instances': 1},
     )
 

@@ -8,6 +8,7 @@ import time as time_module
 from core.config import API_KEY, AZURACAST_HOST, INTRO_FILE_TEXT, STATION_ID, TTS_VOICE
 from core.azura_client import AzuraClient
 from core.tts_engine import TTSEngine
+from bot.state import is_radio_decommissioned
 from monitoring.logging_utils import configure_logging
 from monitoring.runtime import HeartbeatMonitor
 from monitoring.sentry import init_sentry
@@ -22,6 +23,10 @@ monitor = HeartbeatMonitor("sbaradio-tts")
 
 
 def main():
+    if is_radio_decommissioned():
+        logger.info("Radio is decommissioned. TTS worker will not start.")
+        return
+
     logger.info(">>> Запуск SbaRadio TTS Worker")
     logger.info("Target: %s | Station ID: %s", AZURACAST_HOST, STATION_ID)
 
@@ -31,6 +36,14 @@ def main():
 
     try:
         while True:
+            if is_radio_decommissioned():
+                logger.info("Radio decommissioned. Stopping TTS worker.")
+                try:
+                    monitor.file_path.unlink(missing_ok=True)
+                except Exception:
+                    logger.debug("Failed to remove decommissioned TTS monitor file", exc_info=True)
+                break
+
             try:
                 queue = api.get_queue()
                 playlist_service.run(api, tts, queue, INTRO_FILE_TEXT)

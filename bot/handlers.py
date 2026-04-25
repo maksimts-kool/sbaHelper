@@ -38,6 +38,7 @@ from bot.state import (
     get_song_votes,
     get_user_votes_summary,
     increment_song_votes,
+    is_radio_decommissioned,
     is_song_in_best,
     mark_song_as_best,
     record_user_vote,
@@ -49,8 +50,20 @@ from bot.state import (
 from core.config import ADMIN_IDS, BEST_PLAYLIST_ID, UPVOTE_THRESHOLD
 
 
+_RADIO_CLOSED_TEXT = "📻 SBA Radio закрыто. Работает только downloader bot."
+
+
+async def _reply_radio_closed(update: Update) -> None:
+    if update.effective_message:
+        await update.effective_message.reply_text(_RADIO_CLOSED_TEXT)
+
+
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Команда /start — отправляет плеер и очередь в чат (только для админов)."""
+    if is_radio_decommissioned():
+        await _reply_radio_closed(update)
+        return
+
     if ADMIN_IDS and update.effective_user.id not in ADMIN_IDS:
         try:
             await context.bot.delete_message(
@@ -118,6 +131,10 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     """Обрабатывает нажатия inline-кнопок."""
     query = update.callback_query
     user_id = query.from_user.id
+
+    if is_radio_decommissioned():
+        await query.answer(_RADIO_CLOSED_TEXT, show_alert=True)
+        return
 
     # --- Changelog wizard: skip notes step ---
     if query.data == "cl_skip_notes":
@@ -367,6 +384,10 @@ async def announcement_command(update: Update, context: ContextTypes.DEFAULT_TYP
     Команда /announcement playlist <id> — отправляет анонс плейлиста в чат.
     Сообщение отправителя удаляется.
     """
+    if is_radio_decommissioned():
+        await _reply_radio_closed(update)
+        return
+
     # Delete the sender's command message immediately
     try:
         await context.bot.delete_message(
@@ -705,6 +726,10 @@ async def votes_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     /votes edit    — личное меню с кнопками удаления голосов
     /votes create  — проголосовать за одну из последних песен
     """
+    if is_radio_decommissioned():
+        await _reply_radio_closed(update)
+        return
+
     args = context.args
 
     if not args:

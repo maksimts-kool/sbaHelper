@@ -49,6 +49,8 @@ UPVOTE_THRESHOLD = int(os.getenv("UPVOTE_THRESHOLD", "5"))
 CHATS_FILE = os.path.join("bot_data", "active_chats.json")
 UPVOTES_FILE = os.path.join("bot_data", "upvotes.json")
 SCHEDULE_NOTIFY_STATE_FILE = os.path.join("bot_data", "schedule_notify_state.json")
+FAREWELL_NOTICE_STATE_FILE = os.path.join("bot_data", "farewell_notice_state.json")
+RADIO_DECOMMISSION_STATE_FILE = os.path.join("bot_data", "radio_decommission_state.json")
 
 # --- Администраторы ---
 # Список user_id через запятую, например: "123456789,987654321"
