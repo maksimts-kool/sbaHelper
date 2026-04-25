@@ -86,7 +86,7 @@ def format_radio_shutdown_notice() -> str:
     """Форматирует уведомление о дате отключения радио."""
     days_left = get_radio_shutdown_days_left()
     return (
-        f"{_RADIO_SHUTDOWN_EMOJI} Радио отключается *30\\.04\\.26*\\. "
+        f"{_RADIO_SHUTDOWN_EMOJI} Радио отключается *27\\.04\\.26*\\. "
         f"{_RADIO_COUNTDOWN_EMOJI} Осталось *{days_left}* дней\\. {_RADIO_SHUTDOWN_EMOJI}"
     )
 
