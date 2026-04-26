@@ -1,12 +1,17 @@
 """
 Обёртки для запросов к AzuraCast API, которые нужны боту.
 """
+import asyncio
 import logging
+import time
+from collections.abc import Awaitable, Callable
+from typing import TypeVar
 
 import httpx
 from tenacity import before_sleep_log, retry, retry_if_exception_type, stop_after_attempt, wait_exponential
 
 from core.config import (
+    API_CACHE_ENABLED,
     API_CONNECT_TIMEOUT,
     API_HEADERS,
     API_POOL_TIMEOUT,
@@ -14,12 +19,18 @@ from core.config import (
     API_RETRY_ATTEMPTS,
     API_WRITE_TIMEOUT,
     AZURACAST_HOST,
+    NOWPLAYING_CACHE_TTL_SEC,
+    QUEUE_CACHE_TTL_SEC,
+    SCHEDULE_CACHE_TTL_SEC,
     STATION_ID,
 )
 
 logger = logging.getLogger(__name__)
+T = TypeVar("T")
 
 _CLIENT: httpx.AsyncClient | None = None
+_CACHE: dict[tuple[object, ...], tuple[float, object]] = {}
+_CACHE_LOCK = asyncio.Lock()
 _TIMEOUT = httpx.Timeout(
     connect=API_CONNECT_TIMEOUT,
     read=API_READ_TIMEOUT,
@@ -33,6 +44,42 @@ _RETRYABLE_EXCEPTIONS = (
 )
 
 
+async def _get_cached(
+    key: tuple[object, ...],
+    ttl_sec: float,
+    loader: Callable[[], Awaitable[T]],
+    should_cache: Callable[[T], bool] | None = None,
+) -> T:
+    if not API_CACHE_ENABLED or ttl_sec <= 0:
+        return await loader()
+
+    now = time.monotonic()
+    async with _CACHE_LOCK:
+        cached = _CACHE.get(key)
+        if cached and cached[0] > now:
+            return cached[1]  # type: ignore[return-value]
+
+    value = await loader()
+    if should_cache is None:
+        should_cache = lambda result: result is not None
+    if not should_cache(value):
+        return value
+
+    async with _CACHE_LOCK:
+        _CACHE[key] = (time.monotonic() + ttl_sec, value)
+
+    return value
+
+
+async def _clear_cache(*keys: tuple[object, ...]) -> None:
+    async with _CACHE_LOCK:
+        if keys:
+            for key in keys:
+                _CACHE.pop(key, None)
+        else:
+            _CACHE.clear()
+
+
 async def _get_client() -> httpx.AsyncClient:
     global _CLIENT
     if _CLIENT is None or _CLIENT.is_closed:
@@ -42,6 +89,7 @@ async def _get_client() -> httpx.AsyncClient:
 
 async def close_api_client() -> None:
     global _CLIENT
+    await _clear_cache()
     if _CLIENT is not None and not _CLIENT.is_closed:
         await _CLIENT.aclose()
     _CLIENT = None
@@ -73,28 +121,34 @@ async def _request(method: str, url: str, **kwargs) -> httpx.Response:
 
 async def get_station_data() -> dict | None:
     """Получает данные о текущем треке (NowPlaying)."""
-    url = f"{AZURACAST_HOST}/api/nowplaying/{STATION_ID}"
-    try:
-        response = await _request("GET", url)
-        return response.json()
-    except httpx.HTTPStatusError as e:
-        logger.warning("API Error (NowPlaying): status=%s", e.response.status_code)
-    except httpx.HTTPError as e:
-        logger.error("API Error (NowPlaying): %s", e)
-    return None
+    async def load() -> dict | None:
+        url = f"{AZURACAST_HOST}/api/nowplaying/{STATION_ID}"
+        try:
+            response = await _request("GET", url)
+            return response.json()
+        except httpx.HTTPStatusError as e:
+            logger.warning("API Error (NowPlaying): status=%s", e.response.status_code)
+        except httpx.HTTPError as e:
+            logger.error("API Error (NowPlaying): %s", e)
+        return None
+
+    return await _get_cached(("nowplaying", STATION_ID), NOWPLAYING_CACHE_TTL_SEC, load)
 
 
 async def get_queue_data() -> list:
     """Получает список очереди воспроизведения."""
-    url = f"{AZURACAST_HOST}/api/station/{STATION_ID}/queue"
-    try:
-        response = await _request("GET", url)
-        return response.json()
-    except httpx.HTTPStatusError as e:
-        logger.warning("API Error (Queue): status=%s", e.response.status_code)
-    except httpx.HTTPError as e:
-        logger.error("API Error (Queue): %s", e)
-    return []
+    async def load() -> list | None:
+        url = f"{AZURACAST_HOST}/api/station/{STATION_ID}/queue"
+        try:
+            response = await _request("GET", url)
+            return response.json()
+        except httpx.HTTPStatusError as e:
+            logger.warning("API Error (Queue): status=%s", e.response.status_code)
+        except httpx.HTTPError as e:
+            logger.error("API Error (Queue): %s", e)
+        return None
+
+    return await _get_cached(("queue", STATION_ID), QUEUE_CACHE_TTL_SEC, load) or []
 
 
 async def skip_song_api() -> tuple[bool, str]:
@@ -102,6 +156,7 @@ async def skip_song_api() -> tuple[bool, str]:
     url = f"{AZURACAST_HOST}/api/station/{STATION_ID}/backend/skip"
     try:
         await _request("POST", url)
+        await _clear_cache(("nowplaying", STATION_ID), ("queue", STATION_ID))
         return True, "Skipped"
     except httpx.HTTPStatusError as e:
         return False, f"Error {e.response.status_code}"
@@ -118,6 +173,7 @@ async def stop_station_component(component: str) -> tuple[bool, str]:
     url = f"{AZURACAST_HOST}/api/station/{STATION_ID}/{component}/stop"
     try:
         await _request("POST", url)
+        await _clear_cache()
         return True, "stopped"
     except httpx.HTTPStatusError as e:
         logger.error(
@@ -255,15 +311,18 @@ async def is_media_in_playlist(song_unique_id: str, playlist_id: int) -> bool:
 
 async def get_schedule(rows: int = 48) -> list:
     """Получает расписание станции (текущие и ближайшие события)."""
-    url = f"{AZURACAST_HOST}/api/station/{STATION_ID}/schedule"
-    try:
-        response = await _request("GET", url, params={"rows": rows})
-        return response.json()
-    except httpx.HTTPStatusError as e:
-        logger.warning("API Error (Schedule): status=%s", e.response.status_code)
-    except httpx.HTTPError as e:
-        logger.error("API Error (Schedule): %s", e)
-    return []
+    async def load() -> list | None:
+        url = f"{AZURACAST_HOST}/api/station/{STATION_ID}/schedule"
+        try:
+            response = await _request("GET", url, params={"rows": rows})
+            return response.json()
+        except httpx.HTTPStatusError as e:
+            logger.warning("API Error (Schedule): status=%s", e.response.status_code)
+        except httpx.HTTPError as e:
+            logger.error("API Error (Schedule): %s", e)
+        return None
+
+    return await _get_cached(("schedule", STATION_ID, rows), SCHEDULE_CACHE_TTL_SEC, load) or []
 
 
 async def get_station_history(limit: int = 5) -> list:

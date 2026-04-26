@@ -14,6 +14,10 @@ API_READ_TIMEOUT = float(os.getenv("API_READ_TIMEOUT", "30"))
 API_WRITE_TIMEOUT = float(os.getenv("API_WRITE_TIMEOUT", "30"))
 API_POOL_TIMEOUT = float(os.getenv("API_POOL_TIMEOUT", "20"))
 API_RETRY_ATTEMPTS = int(os.getenv("API_RETRY_ATTEMPTS", "4"))
+API_CACHE_ENABLED = os.getenv("API_CACHE_ENABLED", "1").lower() not in {"0", "false", "no", "off"}
+NOWPLAYING_CACHE_TTL_SEC = float(os.getenv("NOWPLAYING_CACHE_TTL_SEC", "5"))
+QUEUE_CACHE_TTL_SEC = float(os.getenv("QUEUE_CACHE_TTL_SEC", "10"))
+SCHEDULE_CACHE_TTL_SEC = float(os.getenv("SCHEDULE_CACHE_TTL_SEC", "30"))
 
 # --- Telegram Bot ---
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
