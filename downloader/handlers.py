@@ -35,6 +35,7 @@ SEND_VIDEO_EMOJI = "![📤](tg://emoji?id=5201691993775818138)"
 LENGTH_EMOJI_ID = "5350438526691326210"
 VIEWS_EMOJI_ID = "5210956306952758910"
 LIKES_EMOJI_ID = "5337080053119336309"
+VIDEO_CAPTION_AD = "Большие видео или аудио можно скачать тут https://sba-ytdlp.vercel.app/"
 
 
 # --------------------------------------------------------------------------- #
@@ -92,6 +93,7 @@ def _build_video_caption(info) -> str:
         )
 
     lines.append(f"👤 {uploader}")
+    lines.extend(["", html.escape(VIDEO_CAPTION_AD)])
     return "\n".join(lines)
 
 
