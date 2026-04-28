@@ -48,36 +48,35 @@ services:
 
   downloader-check:
     build: .
-    profiles: ["check"]
+    profiles: [ "check" ]
     restart: "no"
-    command: ["python", "-m", "downloader.service", "check"]
+    command: [ "python", "-m", "downloader.service", "check" ]
     volumes: *downloader-volumes
     environment: *downloader-env
 
   umap-route-bot:
     build: .
-    profiles: ["umap"]
     container_name: umap-route-bot
     restart: unless-stopped
-    command: ["python", "-m", "umap.app.service"]
+    command: [ "python", "-m", "umap.app.service" ]
     volumes:
       - umap-data:/data
     environment: *umap-env
 
   umap-check:
     build: .
-    profiles: ["check"]
+    profiles: [ "check" ]
     restart: "no"
-    command: ["python", "-m", "umap.app.service", "check"]
+    command: [ "python", "-m", "umap.app.service", "check" ]
     volumes:
       - umap-data:/data
     environment: *umap-env
 
   umap-test:
     build: .
-    profiles: ["test"]
+    profiles: [ "test" ]
     restart: "no"
-    command: ["python", "-m", "unittest", "umap.app.tests"]
+    command: [ "python", "-m", "unittest", "umap.app.tests" ]
     environment: *umap-env
 
 volumes:
