@@ -1281,6 +1281,7 @@ async def run_bot() -> None:
     )
 
     try:
+        await bot.delete_webhook(drop_pending_updates=True)
         await dp.start_polling(bot)
     finally:
         watcher_task.cancel()
