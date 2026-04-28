@@ -13,15 +13,11 @@ from typing import Callable
 import yt_dlp
 
 from downloader.config import (
-    COOKIES_BROWSER,
-    COOKIES_BROWSER_CONTAINER,
-    COOKIES_BROWSER_KEYRING,
-    COOKIES_BROWSER_PROFILE,
     COOKIES_FILE,
     DOWNLOAD_DIR,
-    DOWNLOADER_USER_AGENT,
     MAX_DURATION_SEC,
     MAX_FILE_SIZE_MB,
+    YOUTUBE_COOKIES_FILE,
 )
 
 logger = logging.getLogger(__name__)
@@ -46,19 +42,6 @@ _RETRYABLE_YTDLP_ERROR_TOKENS = _DNS_ERROR_TOKENS + (
     "timed out",
     "timeout",
 )
-
-SUPPORTED_BROWSER_COOKIE_SOURCES = {
-    "brave",
-    "chrome",
-    "chromium",
-    "edge",
-    "firefox",
-    "opera",
-    "safari",
-    "vivaldi",
-    "whale",
-}
-
 
 @dataclass
 class VideoInfo:
@@ -106,52 +89,25 @@ def _ensure_dir() -> str:
     return DOWNLOAD_DIR
 
 
-def _get_browser_cookie_spec() -> tuple[str, str | None, str | None, str | None] | None:
-    if not COOKIES_BROWSER:
-        return None
-    if COOKIES_BROWSER not in SUPPORTED_BROWSER_COOKIE_SOURCES:
-        logger.warning(
-            "Unsupported COOKIES_BROWSER=%r. Ignoring browser cookies.",
-            COOKIES_BROWSER,
-        )
-        return None
-    return (
-        COOKIES_BROWSER,
-        COOKIES_BROWSER_PROFILE or None,
-        COOKIES_BROWSER_KEYRING or None,
-        COOKIES_BROWSER_CONTAINER or None,
-    )
+def _get_cookie_file_for_url(url: str) -> str:
+    if _is_youtube_url(url):
+        return YOUTUBE_COOKIES_FILE
+    return COOKIES_FILE.strip()
 
 
-def _apply_auth_options(ydl_opts: dict) -> None:
-    auth_sources: list[str] = []
-
-    if COOKIES_FILE:
-        if os.path.exists(COOKIES_FILE):
-            ydl_opts["cookiefile"] = COOKIES_FILE
-            auth_sources.append(f"cookiefile={COOKIES_FILE}")
+def _apply_auth_options(ydl_opts: dict, url: str) -> None:
+    cookie_file = _get_cookie_file_for_url(url)
+    if cookie_file:
+        if os.path.exists(cookie_file):
+            ydl_opts["cookiefile"] = cookie_file
+            logger.debug("yt-dlp cookie file enabled: %s", cookie_file)
+            if _is_youtube_url(url):
+                ydl_opts["js_runtimes"] = {"node": {}}
+                ydl_opts["remote_components"] = ["ejs:github"]
         else:
-            logger.warning("COOKIES_FILE is set but not found: %s", COOKIES_FILE)
-
-    browser_cookie_spec = _get_browser_cookie_spec()
-    if browser_cookie_spec:
-        ydl_opts["cookiesfrombrowser"] = browser_cookie_spec
-        browser_name, profile, _, container = browser_cookie_spec
-        details = [browser_name]
-        if profile:
-            details.append(f"profile={profile}")
-        if container:
-            details.append(f"container={container}")
-        auth_sources.append("browser=" + ", ".join(details))
-
-    if DOWNLOADER_USER_AGENT:
-        ydl_opts.setdefault("http_headers", {})["User-Agent"] = DOWNLOADER_USER_AGENT
-        auth_sources.append("custom-user-agent")
-
-    if auth_sources:
-        logger.debug("yt-dlp auth options enabled: %s", "; ".join(auth_sources))
+            logger.warning("Cookie file is set but not found: %s", cookie_file)
     else:
-        logger.debug("yt-dlp auth options are not configured.")
+        logger.debug("yt-dlp cookie file is not configured for this URL.")
 
 
 def _build_ydl_opts(
@@ -164,6 +120,7 @@ def _build_ydl_opts(
     ydl_opts: dict = {
         "quiet": True,
         "no_warnings": True,
+        "ignoreconfig": True,
         "noplaylist": True,
         "socket_timeout": 30,
         "retries": YTDLP_RETRY_ATTEMPTS,
@@ -191,8 +148,9 @@ def _build_ydl_opts(
             ydl_opts["progress_hooks"] = [progress_hook]
     else:
         ydl_opts["skip_download"] = True
+        ydl_opts["format"] = _get_metadata_format_selector(url)
 
-    _apply_auth_options(ydl_opts)
+    _apply_auth_options(ydl_opts, url)
     return ydl_opts
 
 
@@ -205,8 +163,27 @@ def _is_tiktok_url(url: str) -> bool:
     return "tiktok.com" in url.lower()
 
 
-def _is_youtube_shorts_url(url: str) -> bool:
-    return "youtube.com/shorts/" in url.lower()
+def _is_youtube_url(url: str) -> bool:
+    lowered = url.lower()
+    return "youtube.com/" in lowered or "youtu.be/" in lowered
+
+
+def _get_metadata_format_selector(url: str) -> str:
+    """
+    Metadata checks only need a representative video format.
+    Keep this permissive so yt-dlp does not reject a smoke-check URL because
+    a specific downloadable mux is unavailable.
+    """
+    if _is_tiktok_url(url):
+        return "best[ext=mp4][height<=1080]/best[height<=1080]/best"
+
+    return (
+        "best*[vcodec!=none][height<=1080]/"
+        "bestvideo*[vcodec!=none][height<=1080]/"
+        "best*[vcodec!=none]/"
+        "bestvideo*[vcodec!=none]/"
+        "best"
+    )
 
 
 def _get_format_selector(url: str) -> str:
@@ -218,7 +195,7 @@ def _get_format_selector(url: str) -> str:
     - Facebook Reels: сначала пробуем готовый mp4, затем fallback на video+audio.
     - TikTok: чаще всего лучший результат даёт готовый mp4 без агрессивного выбора дорожек.
     """
-    if _is_youtube_shorts_url(url):
+    if _is_youtube_url(url):
         return (
             "bestvideo[ext=mp4][height<=1080][vcodec!=none]+bestaudio[ext=m4a]/"
             "bestvideo[height<=1080][vcodec!=none]+bestaudio/"
@@ -368,8 +345,7 @@ def _rewrite_download_error(url: str, err_msg: str) -> str:
     ):
         return (
             "Facebook запросил авторизацию. Укажите свежий COOKIES_FILE "
-            "или настройте COOKIES_BROWSER (например firefox/chrome/edge) "
-            "с профилем, где вы уже вошли в аккаунт."
+            "в формате Netscape cookies.txt."
         )
     return err_msg
 

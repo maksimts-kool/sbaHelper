@@ -1,83 +1,36 @@
+x-downloader-env: &downloader-env
+  MAX_FILE_SIZE_MB: ${MAX_FILE_SIZE_MB:-50}
+  MAX_DURATION_SEC: ${MAX_DURATION_SEC:-300}
+  COOKIES_FILE: ${COOKIES_FILE:-/app/cookies/tiktok.txt}
+  YOUTUBE_COOKIES_FILE: ${YOUTUBE_COOKIES_FILE:-}
+  CHECK_YOUTUBE_URL: ${CHECK_YOUTUBE_URL:-}
+  CHECK_TIKTOK_URL: ${CHECK_TIKTOK_URL:-}
+  CHECK_FACEBOOK_URL: ${CHECK_FACEBOOK_URL:-}
+  STARTUP_CHECKS_REQUIRED: ${STARTUP_CHECKS_REQUIRED:-1}
+  LOG_LEVEL: ${LOG_LEVEL:-INFO}
+  SENTRY_DSN: ${SENTRY_DSN:-}
+  SENTRY_ENVIRONMENT: ${SENTRY_ENVIRONMENT:-production}
+  SENTRY_RELEASE: ${SENTRY_RELEASE:-}
+
+x-downloader-volumes: &downloader-volumes
+  - /tmp/downloader_videos:/tmp/downloader_videos
+  - ./downloader/cookies:/app/cookies
+
 services:
-  sbaradio-tts:
-    build: .
-    container_name: sbaradio-tts
-    restart: on-failure
-    volumes:
-      - ./bot_data:/app/bot_data # общий флаг деактивации радио
-      - ./runtime:/app/runtime
-    environment:
-      AZURACAST_HOST: ${AZURACAST_HOST:-}
-      STATION_ID: ${STATION_ID:-2}
-      API_KEY: ${API_KEY:-}
-      TTS_VOICE: ${TTS_VOICE:-ru-RU-SvetlanaNeural}
-      INTRO_FILE_TEXT: ${INTRO_FILE_TEXT:-intro}
-      LOG_LEVEL: ${LOG_LEVEL:-INFO}
-      SENTRY_DSN: ${SENTRY_DSN:-}
-      PYTHONUNBUFFERED: "1"
-    healthcheck:
-      test: ["CMD", "python", "-m", "monitoring.healthcheck", "--service", "sbaradio-tts", "--max-age", "180"]
-      interval: 30s
-      timeout: 10s
-      retries: 3
-      start_period: 60s
-
-  sbaradio-bot:
-    build: .
-    container_name: sbaradio-bot
-    restart: on-failure
-    # Используем тот же образ, но запускаем другой скрипт
-    command: [ "python", "bot.py" ]
-    volumes:
-      - ./bot_data:/app/bot_data # Сохранение данных аналитики при перезагрузке
-      - ./runtime:/app/runtime
-    environment:
-      AZURACAST_HOST: ${AZURACAST_HOST:-}
-      STATION_ID: ${STATION_ID:-2}
-      API_KEY: ${API_KEY:-}
-      TELEGRAM_TOKEN: ${TELEGRAM_TOKEN:-}
-      TZ: ${TZ:-Europe/Tallinn}
-      ADMIN_IDS: ${ADMIN_IDS:-} # Через запятую: 123456789,987654321
-      API_CACHE_ENABLED: ${API_CACHE_ENABLED:-1}
-      NOWPLAYING_CACHE_TTL_SEC: ${NOWPLAYING_CACHE_TTL_SEC:-5}
-      QUEUE_CACHE_TTL_SEC: ${QUEUE_CACHE_TTL_SEC:-10}
-      SCHEDULE_CACHE_TTL_SEC: ${SCHEDULE_CACHE_TTL_SEC:-30}
-      LOG_LEVEL: ${LOG_LEVEL:-INFO}
-      SENTRY_DSN: ${SENTRY_DSN:-}
-      PYTHONUNBUFFERED: "1"
-    healthcheck:
-      test: ["CMD", "python", "-m", "monitoring.healthcheck", "--service", "sbaradio-bot", "--max-age", "180"]
-      interval: 30s
-      timeout: 10s
-      retries: 3
-      start_period: 60s
-
   downloader-bot:
     build: .
     container_name: downloader-bot
     restart: unless-stopped
-    command: [ "python", "downloader_bot.py" ]
-    volumes:
-      - /tmp/downloader_videos:/tmp/downloader_videos # временные видео
-      - ./cookies:/app/cookies # cookies.txt для авторизации на сайтах вроде TikTok / Facebook
-      - ./runtime:/app/runtime
+    volumes: *downloader-volumes
     environment:
+      <<: *downloader-env
       DOWNLOADER_BOT_TOKEN: ${DOWNLOADER_BOT_TOKEN:-}
-      ALLOWED_CHAT_IDS: ${ALLOWED_CHAT_IDS:-} # только эта группа; несколько — через запятую
-      MAX_FILE_SIZE_MB: ${MAX_FILE_SIZE_MB:-50} # макс. размер файла для Telegram
-      MAX_DURATION_SEC: ${MAX_DURATION_SEC:-300} # макс. длительность (5 мин)
-      COOKIES_FILE: ${COOKIES_FILE:-/app/cookies/tiktok.txt}
-      COOKIES_BROWSER: ${COOKIES_BROWSER:-}
-      COOKIES_BROWSER_PROFILE: ${COOKIES_BROWSER_PROFILE:-}
-      COOKIES_BROWSER_KEYRING: ${COOKIES_BROWSER_KEYRING:-}
-      COOKIES_BROWSER_CONTAINER: ${COOKIES_BROWSER_CONTAINER:-}
-      DOWNLOADER_USER_AGENT: ${DOWNLOADER_USER_AGENT:-}
-      LOG_LEVEL: ${LOG_LEVEL:-INFO}
-      SENTRY_DSN: ${SENTRY_DSN:-}
-      PYTHONUNBUFFERED: "1"
-    healthcheck:
-      test: ["CMD", "python", "-m", "monitoring.healthcheck", "--service", "downloader-bot", "--max-age", "180"]
-      interval: 30s
-      timeout: 10s
-      retries: 3
-      start_period: 60s
+      ALLOWED_CHAT_IDS: ${ALLOWED_CHAT_IDS:-}
+
+  downloader-check:
+    build: .
+    profiles: ["check"]
+    restart: "no"
+    command: ["python", "-m", "downloader.check_links"]
+    volumes: *downloader-volumes
+    environment: *downloader-env

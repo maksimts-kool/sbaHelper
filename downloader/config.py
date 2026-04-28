@@ -22,17 +22,23 @@ DOWNLOAD_DIR = os.getenv("DOWNLOAD_DIR", "/tmp/downloader_videos")
 # Нужны для видео с ограниченным доступом (TikTok / Facebook и т.д.).
 # Путь к файлу внутри контейнера, например: /app/cookies/auth.txt
 COOKIES_FILE = os.getenv("COOKIES_FILE", "")
+YOUTUBE_COOKIES_FILE = os.getenv("YOUTUBE_COOKIES_FILE", "").strip()
 
-# --- Куки из браузера ---
-# Удобно для локального запуска на той же машине, где уже выполнен вход в Facebook.
-# Поддерживаемые браузеры yt-dlp: brave, chrome, chromium, edge, firefox, opera, safari, vivaldi, whale
-COOKIES_BROWSER = os.getenv("COOKIES_BROWSER", "").strip().lower()
-COOKIES_BROWSER_PROFILE = os.getenv("COOKIES_BROWSER_PROFILE", "").strip()
-COOKIES_BROWSER_KEYRING = os.getenv("COOKIES_BROWSER_KEYRING", "").strip().lower()
-COOKIES_BROWSER_CONTAINER = os.getenv("COOKIES_BROWSER_CONTAINER", "").strip()
+# --- Проверка поддерживаемых сервисов ---
+CHECK_YOUTUBE_URL = os.getenv("CHECK_YOUTUBE_URL", "").strip()
+CHECK_TIKTOK_URL = os.getenv("CHECK_TIKTOK_URL", "").strip()
+CHECK_FACEBOOK_URL = os.getenv("CHECK_FACEBOOK_URL", "").strip()
+STARTUP_CHECKS_REQUIRED = os.getenv("STARTUP_CHECKS_REQUIRED", "1").strip().lower() not in {
+    "0",
+    "false",
+    "no",
+    "off",
+}
 
-# Иногда сайт требует тот же User-Agent, что и у браузера с актуальной сессией.
-DOWNLOADER_USER_AGENT = os.getenv("DOWNLOADER_USER_AGENT", "").strip()
+# --- Error tracking ---
+SENTRY_DSN = os.getenv("SENTRY_DSN", "").strip()
+SENTRY_ENVIRONMENT = os.getenv("SENTRY_ENVIRONMENT", "production").strip()
+SENTRY_RELEASE = os.getenv("SENTRY_RELEASE", "").strip()
 
 # --- Разрешённые чаты ---
 # Список chat_id через запятую, например: "-1001234567890,-1009876543210"

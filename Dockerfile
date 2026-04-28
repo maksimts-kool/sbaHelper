@@ -1,14 +1,28 @@
-FROM python:3.12-slim
+FROM node:24-bookworm-slim
 
-RUN apt-get update && apt-get install -y ffmpeg tzdata && rm -rf /var/lib/apt/lists/*
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+        ca-certificates \
+        ffmpeg \
+        python3 \
+        python3-pip \
+        python3-venv \
+        tzdata \
+    && rm -rf /var/lib/apt/lists/*
 
 ENV TZ=Europe/Tallinn
+ENV PYTHONUNBUFFERED=1
+ENV VIRTUAL_ENV=/opt/venv
+ENV PATH="/opt/venv/bin:$PATH"
 
 WORKDIR /app
 
-COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+RUN python3 -m venv "$VIRTUAL_ENV"
 
-# Copy the entire project (entry points + packages)
-COPY . .
-CMD ["python", "main.py"]
+COPY requirements.txt .
+RUN python -m pip install --upgrade pip \
+    && python -m pip install --no-cache-dir -r requirements.txt
+
+COPY downloader ./downloader
+
+CMD ["python", "-m", "downloader.entrypoint"]

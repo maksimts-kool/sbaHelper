@@ -5,11 +5,17 @@ import re
 
 _FACEBOOK_HOST = r"(?:[\w-]+\.)?facebook\.com"
 _FACEBOOK_PATH_SUFFIX = r"(?:[/?][^\s]*)?"
+_YOUTUBE_HOST = r"(?:(?:www|m)\.)?youtube\.com"
 
 SUPPORTED_URL_PATTERNS: list[re.Pattern[str]] = [
     re.compile(r"https?://vm\.tiktok\.com/\S+", re.IGNORECASE),
     re.compile(r"https?://(?:www\.)?tiktok\.com/\S+", re.IGNORECASE),
-    re.compile(r"https?://(?:www\.)?youtube\.com/shorts/\S+", re.IGNORECASE),
+    re.compile(rf"https?://{_YOUTUBE_HOST}/shorts/\S+", re.IGNORECASE),
+    re.compile(
+        rf"https?://{_YOUTUBE_HOST}/watch\?(?=[^\s#]*\bv=[^&#\s]+)[^\s#]+",
+        re.IGNORECASE,
+    ),
+    re.compile(r"https?://youtu\.be/[^/?#\s]+(?:[/?][^\s]*)?", re.IGNORECASE),
     re.compile(
         rf"https?://{_FACEBOOK_HOST}/watch(?:/live)?/\?(?=[^\s#]*\b(?:v|video_id)=[^&#\s]+)[^\s#]+",
         re.IGNORECASE,

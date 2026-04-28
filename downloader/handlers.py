@@ -1,6 +1,6 @@
 """
 Обработчики сообщений Telegram-бота загрузчика.
-Детектируют ссылки TikTok / YouTube Shorts и скачивают видео с отчётом прогресса.
+Детектируют ссылки TikTok / YouTube / Facebook и скачивают видео с отчётом прогресса.
 """
 import asyncio
 import html
@@ -25,6 +25,7 @@ from downloader.core import (
     download_video,
     fetch_info,
 )
+from downloader.error_tracking import capture_exception
 from downloader.url_support import extract_supported_url
 
 logger = logging.getLogger(__name__)
@@ -200,6 +201,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         )
         return
     except Exception as e:
+        capture_exception(e)
         logger.exception("Unexpected error in fetch_info")
         await _safe_edit(status_msg, "❌ Неизвестная ошибка при получении информации\\.")
         return
@@ -277,8 +279,9 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         short_err = str(e)[:200]
         await _safe_edit(status_msg, f"❌ Ошибка загрузки:\n`{_escape_md_v2(short_err)}`")
         return
-    except Exception:
+    except Exception as e:
         logger.exception("[%s] Unexpected error in download_video for %s", chat_label, url)
+        capture_exception(e)
         await _safe_edit(status_msg, "❌ Неизвестная ошибка при скачивании\\.")
         return
 
