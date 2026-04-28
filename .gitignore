@@ -3,5 +3,6 @@
 !.env.example
 __pycache__/
 *.py[cod]
+*.sqlite3
 downloader/cookies/*
 !downloader/cookies/.gitkeep

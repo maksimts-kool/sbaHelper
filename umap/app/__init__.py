@@ -1,0 +1,1 @@
+"""uMap Telegram notifier."""

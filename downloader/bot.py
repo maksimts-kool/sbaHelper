@@ -9,13 +9,14 @@ from telegram import BotCommand
 from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, filters
 from telegram.request import HTTPXRequest
 
-from downloader.config import (
+from downloader.service import (
     ALLOWED_CHAT_IDS,
     DOWNLOADER_BOT_TOKEN,
     MAX_DURATION_SEC,
     MAX_FILE_SIZE_MB,
+    capture_exception,
+    init_error_tracking,
 )
-from downloader.error_tracking import capture_exception, init_error_tracking
 from downloader.handlers import handle_message
 
 

@@ -18,11 +18,13 @@ ENV PATH="/opt/venv/bin:$PATH"
 WORKDIR /app
 
 RUN python3 -m venv "$VIRTUAL_ENV"
+RUN mkdir -p /data
 
 COPY requirements.txt .
 RUN python -m pip install --upgrade pip \
     && python -m pip install --no-cache-dir -r requirements.txt
 
 COPY downloader ./downloader
+COPY umap ./umap
 
-CMD ["python", "-m", "downloader.entrypoint"]
+CMD ["python", "-m", "downloader.service"]

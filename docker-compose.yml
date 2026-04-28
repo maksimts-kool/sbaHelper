@@ -16,6 +16,25 @@ x-downloader-volumes: &downloader-volumes
   - /tmp/downloader_videos:/tmp/downloader_videos
   - ./downloader/cookies:/app/cookies
 
+x-umap-env: &umap-env
+  TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN:-}
+  DEFAULT_SUBSCRIBER_CHAT_ID: ${DEFAULT_SUBSCRIBER_CHAT_ID:-}
+  UMAP_STATE_PATH: ${UMAP_STATE_PATH:-/data/umap-state.json}
+  UMAP_BASE_URL: ${UMAP_BASE_URL:-https://umap.openstreetmap.fr}
+  UMAP_MAP_ID: ${UMAP_MAP_ID:-1393155}
+  UMAP_LAYER_ID: ${UMAP_LAYER_ID:-82e959ea-1b66-4088-b7f3-8fe6a06c3c4a}
+  UMAP_PLANS_LAYER_ID: ${UMAP_PLANS_LAYER_ID:-}
+  UMAP_MAP_URL: ${UMAP_MAP_URL:-http://u.osmfr.org/m/1393155/}
+  POLL_INTERVAL_SECONDS: ${POLL_INTERVAL_SECONDS:-300}
+  CHANGE_POLL_INTERVAL_SECONDS: ${CHANGE_POLL_INTERVAL_SECONDS:-3600}
+  REQUEST_TIMEOUT_SECONDS: ${REQUEST_TIMEOUT_SECONDS:-30}
+  UMAP_STARTUP_CHECKS_REQUIRED: ${UMAP_STARTUP_CHECKS_REQUIRED:-1}
+  LOG_LEVEL: ${LOG_LEVEL:-INFO}
+  BOOTSTRAP_NOTIFY_EXISTING: ${BOOTSTRAP_NOTIFY_EXISTING:-false}
+  SENTRY_DSN: ${SENTRY_DSN:-}
+  SENTRY_ENVIRONMENT: ${SENTRY_ENVIRONMENT:-production}
+  SENTRY_RELEASE: ${SENTRY_RELEASE:-}
+
 services:
   downloader-bot:
     build: .
@@ -31,6 +50,35 @@ services:
     build: .
     profiles: ["check"]
     restart: "no"
-    command: ["python", "-m", "downloader.check_links"]
+    command: ["python", "-m", "downloader.service", "check"]
     volumes: *downloader-volumes
     environment: *downloader-env
+
+  umap-route-bot:
+    build: .
+    profiles: ["umap"]
+    container_name: umap-route-bot
+    restart: unless-stopped
+    command: ["python", "-m", "umap.app.service"]
+    volumes:
+      - umap-data:/data
+    environment: *umap-env
+
+  umap-check:
+    build: .
+    profiles: ["check"]
+    restart: "no"
+    command: ["python", "-m", "umap.app.service", "check"]
+    volumes:
+      - umap-data:/data
+    environment: *umap-env
+
+  umap-test:
+    build: .
+    profiles: ["test"]
+    restart: "no"
+    command: ["python", "-m", "unittest", "umap.app.tests"]
+    environment: *umap-env
+
+volumes:
+  umap-data:

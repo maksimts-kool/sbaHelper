@@ -14,7 +14,6 @@ from telegram.constants import ChatAction
 from telegram.error import TelegramError
 from telegram.ext import ContextTypes
 
-from downloader.config import ALLOWED_CHAT_IDS
 from downloader.core import (
     DownloadError,
     DownloadResult,
@@ -25,8 +24,7 @@ from downloader.core import (
     download_video,
     fetch_info,
 )
-from downloader.error_tracking import capture_exception
-from downloader.url_support import extract_supported_url
+from downloader.service import ALLOWED_CHAT_IDS, capture_exception, extract_supported_url
 
 logger = logging.getLogger(__name__)
 

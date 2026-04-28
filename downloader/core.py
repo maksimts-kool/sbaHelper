@@ -12,7 +12,7 @@ from typing import Callable
 
 import yt_dlp
 
-from downloader.config import (
+from downloader.service import (
     COOKIES_FILE,
     DOWNLOAD_DIR,
     MAX_DURATION_SEC,
