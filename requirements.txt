@@ -4,3 +4,4 @@ sentry-sdk>=2.0.0
 yt-dlp
 aiogram==3.21.0
 httpx==0.28.1
+pymongo>=4.10.1

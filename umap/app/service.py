@@ -16,12 +16,11 @@ import json
 import logging
 import math
 import os
-import sys
 from contextlib import suppress
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, TypeAlias
+from typing import Any, Protocol, TypeAlias
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 import httpx
@@ -63,6 +62,9 @@ class BotSettings:
     telegram_bot_token: str
     default_subscriber_chat_id: int | None
     state_path: Path
+    state_mongodb_uri: str
+    state_mongodb_database: str
+    state_mongodb_collection: str
     umap_base_url: str
     umap_map_id: str
     umap_map_url: str
@@ -134,6 +136,9 @@ def load_bot_settings() -> BotSettings:
         telegram_bot_token=_required_env("TELEGRAM_BOT_TOKEN"),
         default_subscriber_chat_id=int(chat_id) if chat_id else None,
         state_path=Path(_env("UMAP_STATE_PATH", "umap-state.json")),
+        state_mongodb_uri=_env("UMAP_STATE_MONGODB_URI"),
+        state_mongodb_database=_env("UMAP_STATE_MONGODB_DATABASE", "sbahelper"),
+        state_mongodb_collection=_env("UMAP_STATE_MONGODB_COLLECTION", "umap_state"),
         umap_base_url=_env("UMAP_BASE_URL", "https://umap.openstreetmap.fr"),
         umap_map_id=_env("UMAP_MAP_ID", "1393155"),
         umap_map_url=_env("UMAP_MAP_URL", "http://u.osmfr.org/m/1393155/"),
@@ -315,10 +320,15 @@ class AppState:
     last_current_feature_count_by_layer: dict[str, int] = field(default_factory=dict)
 
 
-class StateStore:
-    def __init__(self, path: Path) -> None:
-        self._path = path
+class StateStore(Protocol):
+    def load(self) -> AppState:
+        ...
 
+    def save(self, state: AppState) -> None:
+        ...
+
+
+class AppStateCodec:
     @staticmethod
     def _string_dict(raw_value: Any) -> dict[str, str]:
         if not isinstance(raw_value, dict):
@@ -331,16 +341,8 @@ class StateStore:
             return {}
         return {str(key): int(value) for key, value in raw_value.items()}
 
-    def load(self) -> AppState:
-        if not self._path.is_file():
-            return AppState()
-
-        try:
-            data = json.loads(self._path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError):
-            logger.exception("Could not read uMap state file %s. Starting with empty state.", self._path)
-            return AppState()
-
+    @classmethod
+    def from_document(cls, data: dict[str, Any]) -> AppState:
         known_feature_ids = {
             normalize_feature_state_key(str(feature_id))
             for feature_id in data.get("known_feature_ids", [])
@@ -372,18 +374,18 @@ class StateStore:
                 str(key): bool(value)
                 for key, value in data.get("bootstrap_completed_by_layer", {}).items()
             },
-            last_checked_at_by_layer=self._string_dict(data.get("last_checked_at_by_layer")),
-            last_change_checked_at_by_layer=self._string_dict(
+            last_checked_at_by_layer=cls._string_dict(data.get("last_checked_at_by_layer")),
+            last_change_checked_at_by_layer=cls._string_dict(
                 data.get("last_change_checked_at_by_layer")
             ),
-            last_current_feature_count_by_layer=self._int_dict(
+            last_current_feature_count_by_layer=cls._int_dict(
                 data.get("last_current_feature_count_by_layer")
             ),
         )
 
-    def save(self, state: AppState) -> None:
-        self._path.parent.mkdir(parents=True, exist_ok=True)
-        data = {
+    @staticmethod
+    def to_document(state: AppState) -> dict[str, Any]:
+        return {
             "known_feature_ids": sorted(state.known_feature_ids),
             "subscriber_chat_ids": sorted(state.subscriber_chat_ids),
             "route_snapshots": {
@@ -401,12 +403,85 @@ class StateStore:
             "last_change_checked_at_by_layer": state.last_change_checked_at_by_layer,
             "last_current_feature_count_by_layer": state.last_current_feature_count_by_layer,
         }
+
+
+class FileStateStore:
+    def __init__(self, path: Path) -> None:
+        self._path = path
+
+    def load(self) -> AppState:
+        if not self._path.is_file():
+            return AppState()
+
+        try:
+            data = json.loads(self._path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            logger.exception("Could not read uMap state file %s. Starting with empty state.", self._path)
+            return AppState()
+
+        return AppStateCodec.from_document(data)
+
+    def save(self, state: AppState) -> None:
+        self._path.parent.mkdir(parents=True, exist_ok=True)
+        data = AppStateCodec.to_document(state)
         tmp_path = self._path.with_suffix(f"{self._path.suffix}.tmp")
         tmp_path.write_text(
             json.dumps(data, ensure_ascii=False, sort_keys=True, indent=2),
             encoding="utf-8",
         )
         os.replace(tmp_path, self._path)
+
+
+class MongoStateStore:
+    def __init__(
+        self,
+        *,
+        uri: str,
+        database: str,
+        collection: str,
+        document_id: str = "umap-route-bot",
+        migrate_from_path: Path | None = None,
+    ) -> None:
+        from pymongo import MongoClient
+
+        self._client = MongoClient(uri, serverSelectionTimeoutMS=5000)
+        self._collection = self._client[database][collection]
+        self._document_id = document_id
+        self._migrate_from_path = migrate_from_path
+
+    def load(self) -> AppState:
+        data = self._collection.find_one({"_id": self._document_id})
+        if data is not None:
+            return AppStateCodec.from_document(data)
+
+        if self._migrate_from_path and self._migrate_from_path.is_file():
+            state = FileStateStore(self._migrate_from_path).load()
+            self.save(state)
+            logger.info(
+                "Migrated uMap state from %s into MongoDB document %s.",
+                self._migrate_from_path,
+                self._document_id,
+            )
+            return state
+
+        return AppState()
+
+    def save(self, state: AppState) -> None:
+        data = AppStateCodec.to_document(state)
+        data["_id"] = self._document_id
+        data["updated_at"] = utc_now_iso()
+        self._collection.replace_one({"_id": self._document_id}, data, upsert=True)
+
+
+def build_state_store(settings: BotSettings) -> StateStore:
+    if settings.state_mongodb_uri:
+        return MongoStateStore(
+            uri=settings.state_mongodb_uri,
+            database=settings.state_mongodb_database,
+            collection=settings.state_mongodb_collection,
+            migrate_from_path=settings.state_path,
+        )
+    return FileStateStore(settings.state_path)
 
 
 # --------------------------------------------------------------------------- #
@@ -653,6 +728,26 @@ async def run_checks() -> list[UmapCheckResult]:
             f"configured {len(settings.watched_layers)} layer(s)",
         )
     ]
+
+    if settings.state_mongodb_uri:
+        try:
+            await asyncio.to_thread(build_state_store(settings).load)
+        except Exception as error:
+            capture_exception(error)
+            logger.exception("MongoDB state store check failed")
+            results.append(UmapCheckResult("state-store", False, str(error)))
+        else:
+            results.append(
+                UmapCheckResult(
+                    "state-store",
+                    True,
+                    (
+                        "MongoDB "
+                        f"{settings.state_mongodb_database}.{settings.state_mongodb_collection}"
+                    ),
+                )
+            )
+
     for layer in settings.watched_layers:
         results.append(await _check_layer(settings, layer))
     return results
@@ -1242,7 +1337,7 @@ async def run_bot() -> None:
     configure_logging(settings.log_level)
     init_error_tracking("umap-route-bot")
 
-    state_store = StateStore(settings.state_path)
+    state_store = build_state_store(settings)
     state = await asyncio.to_thread(state_store.load)
     if (
         settings.default_subscriber_chat_id is not None
@@ -1295,16 +1390,6 @@ async def run_bot() -> None:
         await bot.session.close()
 
 
-def run_check_command() -> int:
-    configure_logging(_env("LOG_LEVEL", "INFO").upper())
-    init_error_tracking("umap-check")
-    results = asyncio.run(run_checks())
-    print_results(results)
-    exit_code = result_exit_code(results)
-    flush_error_tracking()
-    return exit_code
-
-
 def run_startup_then_bot() -> int:
     configure_logging(_env("LOG_LEVEL", "INFO").upper())
     init_error_tracking("umap-startup")
@@ -1329,10 +1414,7 @@ def run_startup_then_bot() -> int:
     return 0
 
 
-def main(argv: list[str] | None = None) -> int:
-    args = list(sys.argv[1:] if argv is None else argv)
-    if args and args[0] in {"check", "--check"}:
-        return run_check_command()
+def main() -> int:
     return run_startup_then_bot()
 
 

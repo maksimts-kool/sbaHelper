@@ -10,7 +10,6 @@ from __future__ import annotations
 import logging
 import os
 import re
-import sys
 from dataclasses import dataclass
 
 import sentry_sdk
@@ -253,21 +252,7 @@ def run_startup_then_bot() -> int:
     return run_bot()
 
 
-def run_check_command() -> int:
-    configure_logging()
-    init_error_tracking("downloader-check")
-
-    results = run_checks()
-    print_results(results)
-    exit_code = result_exit_code(results)
-    flush_error_tracking()
-    return exit_code
-
-
-def main(argv: list[str] | None = None) -> int:
-    args = list(sys.argv[1:] if argv is None else argv)
-    if args and args[0] in {"check", "--check"}:
-        return run_check_command()
+def main() -> int:
     return run_startup_then_bot()
 
 

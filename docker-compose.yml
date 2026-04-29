@@ -20,6 +20,9 @@ x-umap-env: &umap-env
   TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN:-}
   DEFAULT_SUBSCRIBER_CHAT_ID: ${DEFAULT_SUBSCRIBER_CHAT_ID:-}
   UMAP_STATE_PATH: ${UMAP_STATE_PATH:-/data/umap-state.json}
+  UMAP_STATE_MONGODB_URI: ${UMAP_STATE_MONGODB_URI:-}
+  UMAP_STATE_MONGODB_DATABASE: ${UMAP_STATE_MONGODB_DATABASE:-sbahelper}
+  UMAP_STATE_MONGODB_COLLECTION: ${UMAP_STATE_MONGODB_COLLECTION:-umap_state}
   UMAP_BASE_URL: ${UMAP_BASE_URL:-https://umap.openstreetmap.fr}
   UMAP_MAP_ID: ${UMAP_MAP_ID:-1393155}
   UMAP_LAYER_ID: ${UMAP_LAYER_ID:-82e959ea-1b66-4088-b7f3-8fe6a06c3c4a}
@@ -46,14 +49,6 @@ services:
       DOWNLOADER_BOT_TOKEN: ${DOWNLOADER_BOT_TOKEN:-}
       ALLOWED_CHAT_IDS: ${ALLOWED_CHAT_IDS:-}
 
-  downloader-check:
-    build: .
-    profiles: [ "check" ]
-    restart: "no"
-    command: [ "python", "-m", "downloader.service", "check" ]
-    volumes: *downloader-volumes
-    environment: *downloader-env
-
   umap-route-bot:
     build: .
     container_name: umap-route-bot
@@ -61,23 +56,14 @@ services:
     command: [ "python", "-m", "umap.app.service" ]
     volumes:
       - umap-data:/data
-    environment: *umap-env
-
-  umap-check:
-    build: .
-    profiles: [ "check" ]
-    restart: "no"
-    command: [ "python", "-m", "umap.app.service", "check" ]
-    volumes:
-      - umap-data:/data
-    environment: *umap-env
-
-  umap-test:
-    build: .
-    profiles: [ "test" ]
-    restart: "no"
-    command: [ "python", "-m", "unittest", "umap.app.tests" ]
+    networks:
+      - default
+      - shared-db
     environment: *umap-env
 
 volumes:
   umap-data:
+
+networks:
+  shared-db:
+    external: true
