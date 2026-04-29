@@ -123,22 +123,38 @@ def _build_download_progress_line(progress_pct: int) -> str:
     return f"{DOWNLOAD_EMOJI} Скачиваю: \\[{bar}\\] {bounded_pct}%"
 
 
-async def _safe_delete_message(message: Message, retries: int = 3, delay: float = 0.4) -> None:
+async def _safe_delete_message(
+    message: Message,
+    *,
+    bot=None,
+    retries: int = 8,
+    delay: float = 0.75,
+) -> bool:
     """Удаляет сообщение с несколькими попытками на случай временной ошибки Telegram."""
+    chat_id = message.chat_id
+    message_id = message.message_id
+
     for attempt in range(1, retries + 1):
         try:
-            await message.delete()
-            return
+            if bot is not None:
+                await bot.delete_message(chat_id=chat_id, message_id=message_id)
+            else:
+                await message.delete()
+            logger.info("Deleted status message %s in chat %s", message_id, chat_id)
+            return True
         except TelegramError as e:
             error_text = str(e).lower()
             if "message to delete not found" in error_text:
-                return
+                return True
 
             if attempt == retries:
                 logger.warning("delete_message error after %d attempts: %s", retries, e)
-                return
+                return False
 
-            await asyncio.sleep(delay)
+            retry_after = getattr(e, "retry_after", None)
+            await asyncio.sleep(float(retry_after) if retry_after else delay)
+
+    return False
 
 
 # --------------------------------------------------------------------------- #
@@ -310,7 +326,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     )
     await context.bot.send_chat_action(chat_id=chat_id, action=ChatAction.UPLOAD_VIDEO)
 
-    send_failed = False
+    sent_successfully = False
     try:
         with open(result.file_path, "rb") as video_file:
             caption = _build_video_caption(result.info)
@@ -323,15 +339,14 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
                 reply_to_message_id=message.message_id,
             )
     except TelegramError as e:
-        send_failed = True
         logger.error("[%s] Failed to send video: %s", chat_label, e)
         await _safe_edit(status_msg, f"❌ Не удалось отправить видео: {_escape_md_v2(str(e))}")
     else:
+        sent_successfully = True
         logger.info("[%s] Video sent successfully to %s", chat_label, user_label)
+        await _safe_delete_message(status_msg, bot=context.bot)
     finally:
         cleanup(result.file_path)
-        if not send_failed:
-            await _safe_delete_message(status_msg)
 
-    if send_failed:
+    if not sent_successfully:
         return
