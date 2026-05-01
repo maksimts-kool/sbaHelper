@@ -16,7 +16,7 @@ This repo runs two Telegram bots from one Docker Compose project:
 │   ├── core.py              # yt-dlp download/fetch logic
 │   └── cookies/             # Local cookie files, ignored by Git
 ├── umap/                    # Plain Python + aiogram uMap route watcher
-│   └── app/service.py       # Bot, uMap client, checks, state, formatters
+│   └── service.py           # Bot, uMap client, checks, MongoDB state, formatters
 ├── Dockerfile
 ├── docker-compose.yml
 ├── requirements.txt
@@ -39,13 +39,14 @@ For the uMap route bot, fill in:
 
 - `TELEGRAM_BOT_TOKEN`
 - `DEFAULT_SUBSCRIBER_CHAT_ID`, if you want one chat subscribed on first boot
+- `UMAP_STATE_MONGODB_URI`
 - `UMAP_MAP_ID`
 - `UMAP_LAYER_ID`
 - `UMAP_PLANS_LAYER_ID`, if you want to watch the plans layer too
 
 Put cookie files in `downloader/cookies/`. `COOKIES_FILE` is used for TikTok/Facebook. If YouTube needs cookies, set `YOUTUBE_COOKIES_FILE` to a separate YouTube cookie file.
 
-The uMap bot stores its state in MongoDB when `UMAP_STATE_MONGODB_URI` is set. The old JSON path `UMAP_STATE_PATH=/data/umap-state.json` is still mounted so the bot can migrate existing state into MongoDB on first start.
+The uMap bot stores its state only in MongoDB. `UMAP_STATE_MONGODB_URI` is required.
 
 ## Commands
 
@@ -69,8 +70,7 @@ The uMap bot supports:
 - `/chatid` - show the current chat id
 - `/testnotify` - send a test route notification
 
-It stores known route IDs, route snapshots, subscribers, message IDs, and check timestamps in the JSON state file.
-With MongoDB enabled, the same state is stored in the `UMAP_STATE_MONGODB_COLLECTION` collection as one document.
+It stores known route IDs, route snapshots, subscribers, message IDs, and check timestamps in the `UMAP_STATE_MONGODB_COLLECTION` collection as one document.
 
 ## Error Tracking
 

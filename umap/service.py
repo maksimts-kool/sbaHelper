@@ -34,7 +34,7 @@ from aiogram.filters import Command
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup, Message, ReplyParameters
 
 
-load_dotenv(Path(__file__).resolve().parents[2] / ".env")
+load_dotenv(Path(__file__).resolve().parents[1] / ".env")
 logger = logging.getLogger(__name__)
 
 
@@ -61,7 +61,6 @@ class WatchedLayer:
 class BotSettings:
     telegram_bot_token: str
     default_subscriber_chat_id: int | None
-    state_path: Path
     state_mongodb_uri: str
     state_mongodb_database: str
     state_mongodb_collection: str
@@ -135,8 +134,7 @@ def load_bot_settings() -> BotSettings:
     return BotSettings(
         telegram_bot_token=_required_env("TELEGRAM_BOT_TOKEN"),
         default_subscriber_chat_id=int(chat_id) if chat_id else None,
-        state_path=Path(_env("UMAP_STATE_PATH", "umap-state.json")),
-        state_mongodb_uri=_env("UMAP_STATE_MONGODB_URI"),
+        state_mongodb_uri=_required_env("UMAP_STATE_MONGODB_URI"),
         state_mongodb_database=_env("UMAP_STATE_MONGODB_DATABASE", "sbahelper"),
         state_mongodb_collection=_env("UMAP_STATE_MONGODB_COLLECTION", "umap_state"),
         umap_base_url=_env("UMAP_BASE_URL", "https://umap.openstreetmap.fr"),
@@ -405,33 +403,6 @@ class AppStateCodec:
         }
 
 
-class FileStateStore:
-    def __init__(self, path: Path) -> None:
-        self._path = path
-
-    def load(self) -> AppState:
-        if not self._path.is_file():
-            return AppState()
-
-        try:
-            data = json.loads(self._path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError):
-            logger.exception("Could not read uMap state file %s. Starting with empty state.", self._path)
-            return AppState()
-
-        return AppStateCodec.from_document(data)
-
-    def save(self, state: AppState) -> None:
-        self._path.parent.mkdir(parents=True, exist_ok=True)
-        data = AppStateCodec.to_document(state)
-        tmp_path = self._path.with_suffix(f"{self._path.suffix}.tmp")
-        tmp_path.write_text(
-            json.dumps(data, ensure_ascii=False, sort_keys=True, indent=2),
-            encoding="utf-8",
-        )
-        os.replace(tmp_path, self._path)
-
-
 class MongoStateStore:
     def __init__(
         self,
@@ -440,29 +411,17 @@ class MongoStateStore:
         database: str,
         collection: str,
         document_id: str = "umap-route-bot",
-        migrate_from_path: Path | None = None,
     ) -> None:
         from pymongo import MongoClient
 
         self._client = MongoClient(uri, serverSelectionTimeoutMS=5000)
         self._collection = self._client[database][collection]
         self._document_id = document_id
-        self._migrate_from_path = migrate_from_path
 
     def load(self) -> AppState:
         data = self._collection.find_one({"_id": self._document_id})
         if data is not None:
             return AppStateCodec.from_document(data)
-
-        if self._migrate_from_path and self._migrate_from_path.is_file():
-            state = FileStateStore(self._migrate_from_path).load()
-            self.save(state)
-            logger.info(
-                "Migrated uMap state from %s into MongoDB document %s.",
-                self._migrate_from_path,
-                self._document_id,
-            )
-            return state
 
         return AppState()
 
@@ -474,14 +433,11 @@ class MongoStateStore:
 
 
 def build_state_store(settings: BotSettings) -> StateStore:
-    if settings.state_mongodb_uri:
-        return MongoStateStore(
-            uri=settings.state_mongodb_uri,
-            database=settings.state_mongodb_database,
-            collection=settings.state_mongodb_collection,
-            migrate_from_path=settings.state_path,
-        )
-    return FileStateStore(settings.state_path)
+    return MongoStateStore(
+        uri=settings.state_mongodb_uri,
+        database=settings.state_mongodb_database,
+        collection=settings.state_mongodb_collection,
+    )
 
 
 # --------------------------------------------------------------------------- #
@@ -729,24 +685,23 @@ async def run_checks() -> list[UmapCheckResult]:
         )
     ]
 
-    if settings.state_mongodb_uri:
-        try:
-            await asyncio.to_thread(build_state_store(settings).load)
-        except Exception as error:
-            capture_exception(error)
-            logger.exception("MongoDB state store check failed")
-            results.append(UmapCheckResult("state-store", False, str(error)))
-        else:
-            results.append(
-                UmapCheckResult(
-                    "state-store",
-                    True,
-                    (
-                        "MongoDB "
-                        f"{settings.state_mongodb_database}.{settings.state_mongodb_collection}"
-                    ),
-                )
+    try:
+        await asyncio.to_thread(build_state_store(settings).load)
+    except Exception as error:
+        capture_exception(error)
+        logger.exception("MongoDB state store check failed")
+        results.append(UmapCheckResult("state-store", False, str(error)))
+    else:
+        results.append(
+            UmapCheckResult(
+                "state-store",
+                True,
+                (
+                    "MongoDB "
+                    f"{settings.state_mongodb_database}.{settings.state_mongodb_collection}"
+                ),
             )
+        )
 
     for layer in settings.watched_layers:
         results.append(await _check_layer(settings, layer))
