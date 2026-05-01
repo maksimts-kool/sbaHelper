@@ -229,6 +229,7 @@ class RouteChange:
 class CheckResult:
     checked_at: str
     current_feature_count: int
+    previous_known_feature_count: int
     known_feature_count: int
     new_features: list[RouteFeature]
     bootstrap_completed: bool
@@ -782,6 +783,7 @@ class RouteWatcherService:
         notify: bool,
     ) -> CheckResult:
         current_ids = {self._scoped_feature_id(layer, route.feature_id) for route in routes}
+        previous_known_feature_count = self._known_feature_count(layer)
         new_routes = [
             route
             for route in routes
@@ -804,6 +806,7 @@ class RouteWatcherService:
         result = CheckResult(
             checked_at=self._state.last_checked_at_by_layer[layer.key],
             current_feature_count=len(routes),
+            previous_known_feature_count=previous_known_feature_count,
             known_feature_count=self._known_feature_count(layer),
             new_features=new_routes,
             bootstrap_completed=self._state.bootstrap_completed_by_layer[layer.key],
@@ -1248,6 +1251,14 @@ def build_dispatcher(service: RouteWatcherService) -> Dispatcher:
     async def handle_fallback(message: Message) -> None:
         await message.answer("Используй /start, чтобы увидеть доступные команды.")
 
+    @dp.message()
+    async def handle_ignored_message(message: Message) -> None:
+        logger.debug(
+            "Ignored non-command message in chat %s (%s).",
+            message.chat.id,
+            message.chat.type,
+        )
+
     return dp
 
 
@@ -1260,9 +1271,10 @@ async def watch_loop(service: RouteWatcherService, interval_seconds: int) -> Non
                 if result is None:
                     continue
                 logger.info(
-                    "Layer %s checked: current=%s known=%s new=%s",
+                    "Layer %s checked: current=%s known_before=%s known_after=%s new=%s",
                     layer.title,
                     result.current_feature_count,
+                    result.previous_known_feature_count,
                     result.known_feature_count,
                     len(result.new_features),
                 )
