@@ -39,8 +39,6 @@ async def _cmd_start(update, context) -> None:
         "- <code>https://vm.tiktok.com/...</code>\n"
         "- <code>https://www.tiktok.com/...</code>\n"
         "- <code>https://youtube.com/shorts/...</code>\n"
-        "- <code>https://www.youtube.com/watch?v=...</code>\n"
-        "- <code>https://youtu.be/...</code>\n"
         "- <code>https://www.facebook.com/watch/?v=...</code>\n"
         "- <code>https://www.facebook.com/reel/...</code>\n"
         "- <code>https://www.facebook.com/.../videos/...</code>\n"

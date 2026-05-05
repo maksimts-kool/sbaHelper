@@ -2,7 +2,7 @@
 
 This repo runs two Telegram bots from one Docker Compose project:
 
-- `downloader-bot` downloads supported videos from YouTube, TikTok, and Facebook.
+- `downloader-bot` downloads supported videos from YouTube Shorts, TikTok, and Facebook.
 - `umap-route-bot` watches uMap route layers and sends Telegram notifications for new or changed routes.
 
 ## Structure
