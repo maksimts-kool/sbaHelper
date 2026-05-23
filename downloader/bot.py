@@ -16,6 +16,7 @@ from downloader.service import (
     MAX_FILE_SIZE_MB,
     capture_exception,
     init_error_tracking,
+    is_transient_network_error,
 )
 from downloader.handlers import handle_message
 
@@ -60,6 +61,10 @@ async def _post_init(app) -> None:
 
 
 async def _error_handler(update: object, context) -> None:
+    if context.error is not None and is_transient_network_error(context.error):
+        logging.getLogger(__name__).warning("Transient Telegram network error: %s", context.error)
+        return
+
     exc_info = None
     if context.error is not None:
         exc_info = (type(context.error), context.error, context.error.__traceback__)

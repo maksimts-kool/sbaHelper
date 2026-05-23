@@ -16,6 +16,7 @@ import json
 import logging
 import math
 import os
+import random
 from contextlib import suppress
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -29,7 +30,7 @@ from dotenv import load_dotenv
 from aiogram import Bot, Dispatcher, F
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ChatType, ParseMode
-from aiogram.exceptions import TelegramBadRequest
+from aiogram.exceptions import TelegramBadRequest, TelegramNetworkError
 from aiogram.filters import Command
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup, Message, ReplyParameters
 
@@ -71,6 +72,8 @@ class BotSettings:
     poll_interval_seconds: int
     change_poll_interval_seconds: int
     request_timeout_seconds: float
+    request_retry_attempts: int
+    request_retry_backoff_seconds: float
     bootstrap_notify_existing: bool
     log_level: str
 
@@ -144,6 +147,8 @@ def load_bot_settings() -> BotSettings:
         poll_interval_seconds=int(_env("POLL_INTERVAL_SECONDS", "300")),
         change_poll_interval_seconds=int(_env("CHANGE_POLL_INTERVAL_SECONDS", "3600")),
         request_timeout_seconds=float(_env("REQUEST_TIMEOUT_SECONDS", "30")),
+        request_retry_attempts=max(1, int(_env("REQUEST_RETRY_ATTEMPTS", "3"))),
+        request_retry_backoff_seconds=max(0.0, float(_env("REQUEST_RETRY_BACKOFF_SECONDS", "2"))),
         bootstrap_notify_existing=env_bool("BOOTSTRAP_NOTIFY_EXISTING", False),
         log_level=_env("LOG_LEVEL", "INFO").upper(),
     )
@@ -446,8 +451,16 @@ def build_state_store(settings: BotSettings) -> StateStore:
 # --------------------------------------------------------------------------- #
 
 class UmapClient:
-    def __init__(self, datalayer_url: str, timeout_seconds: float) -> None:
+    def __init__(
+        self,
+        datalayer_url: str,
+        timeout_seconds: float,
+        retry_attempts: int = 3,
+        retry_backoff_seconds: float = 2.0,
+    ) -> None:
         self._datalayer_url = datalayer_url
+        self._retry_attempts = max(1, retry_attempts)
+        self._retry_backoff_seconds = max(0.0, retry_backoff_seconds)
         self._client = httpx.AsyncClient(
             timeout=timeout_seconds,
             headers={"User-Agent": "umap-route-bot/1.0 (+https://umap.openstreetmap.fr)"},
@@ -457,10 +470,28 @@ class UmapClient:
         await self._client.aclose()
 
     async def fetch_routes(self) -> list[RouteFeature]:
-        response = await self._client.get(self._datalayer_url)
-        response.raise_for_status()
-        features = response.json().get("features", [])
-        return [self._parse_feature(feature) for feature in features]
+        for attempt in range(1, self._retry_attempts + 1):
+            try:
+                response = await self._client.get(self._datalayer_url)
+                response.raise_for_status()
+                features = response.json().get("features", [])
+                return [self._parse_feature(feature) for feature in features]
+            except Exception as error:
+                if not is_transient_network_error(error) or attempt == self._retry_attempts:
+                    raise
+
+                delay = self._retry_backoff_seconds * attempt + random.uniform(0.0, 0.5)
+                logger.warning(
+                    "Transient uMap fetch failure for %s, retrying in %.1fs (%s/%s): %s",
+                    self._datalayer_url,
+                    delay,
+                    attempt,
+                    self._retry_attempts,
+                    error,
+                )
+                await asyncio.sleep(delay)
+
+        raise RuntimeError("unreachable")
 
     def _parse_feature(self, feature: dict[str, Any]) -> RouteFeature:
         geometry = feature.get("geometry") or {}
@@ -603,6 +634,61 @@ def format_status_message(
 # --------------------------------------------------------------------------- #
 
 _sentry_initialized = False
+_TRANSIENT_HTTP_STATUS_CODES = {408, 425, 429, 500, 502, 503, 504}
+_TRANSIENT_ERROR_TEXT = (
+    "all connection attempts failed",
+    "bad gateway",
+    "cannot connect to host",
+    "connection has been closed",
+    "connection reset",
+    "readtimeout",
+    "server disconnected",
+    "temporarily unavailable",
+    "timed out",
+    "timeout",
+)
+
+
+def is_transient_network_error(error: BaseException) -> bool:
+    current: BaseException | None = error
+    seen: set[int] = set()
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+
+        if isinstance(current, httpx.HTTPStatusError):
+            return current.response.status_code in _TRANSIENT_HTTP_STATUS_CODES
+        if isinstance(current, (httpx.TimeoutException, httpx.TransportError, TelegramNetworkError)):
+            return True
+
+        text = str(current).lower()
+        if any(marker in text for marker in _TRANSIENT_ERROR_TEXT):
+            return True
+
+        current = current.__cause__ or current.__context__
+
+    return False
+
+
+def _sentry_before_send(event: dict[str, Any], hint: dict[str, Any]) -> dict[str, Any] | None:
+    exc_info = hint.get("exc_info")
+    if exc_info and len(exc_info) >= 2 and isinstance(exc_info[1], BaseException):
+        if is_transient_network_error(exc_info[1]):
+            return None
+
+    logentry = event.get("logentry")
+    logentry_message = logentry.get("message") if isinstance(logentry, dict) else logentry
+    message = " ".join(
+        str(part)
+        for part in (
+            event.get("message"),
+            logentry_message,
+        )
+        if part
+    ).lower()
+    if message and any(marker in message for marker in _TRANSIENT_ERROR_TEXT):
+        return None
+
+    return event
 
 
 def init_error_tracking(service_name: str) -> bool:
@@ -622,6 +708,7 @@ def init_error_tracking(service_name: str) -> bool:
         environment=_env("SENTRY_ENVIRONMENT") or None,
         release=_env("SENTRY_RELEASE") or None,
         traces_sample_rate=0.0,
+        before_send=_sentry_before_send,
     )
     sentry_sdk.set_tag("service", service_name)
     _sentry_initialized = True
@@ -630,7 +717,7 @@ def init_error_tracking(service_name: str) -> bool:
 
 
 def capture_exception(error: BaseException) -> None:
-    if _sentry_initialized:
+    if _sentry_initialized and not is_transient_network_error(error):
         sentry_sdk.capture_exception(error)
 
 
@@ -654,6 +741,8 @@ async def _check_layer(settings: BotSettings, layer: WatchedLayer) -> UmapCheckR
     client = UmapClient(
         datalayer_url=settings.build_datalayer_url(layer.layer_id),
         timeout_seconds=settings.request_timeout_seconds,
+        retry_attempts=settings.request_retry_attempts,
+        retry_backoff_seconds=settings.request_retry_backoff_seconds,
     )
     try:
         routes = await client.fetch_routes()
@@ -1221,9 +1310,13 @@ def build_dispatcher(service: RouteWatcherService) -> Dispatcher:
         try:
             results = await service.check_for_updates(notify=True)
         except Exception as error:
-            capture_exception(error)
-            logger.exception("Manual check failed")
-            await message.answer("Не удалось выполнить проверку. Подробности смотри в логах.")
+            if is_transient_network_error(error):
+                logger.warning("Manual check failed because of a transient network error: %s", error)
+                await message.answer("Временная ошибка сети или uMap. Попробуй /check еще раз чуть позже.")
+            else:
+                capture_exception(error)
+                logger.exception("Manual check failed")
+                await message.answer("Не удалось выполнить проверку. Подробности смотри в логах.")
             return
 
         total_new_routes = sum(len(result.new_features) for result in results.values())
@@ -1243,9 +1336,13 @@ def build_dispatcher(service: RouteWatcherService) -> Dispatcher:
         try:
             await service.send_test_notification(message.chat.id)
         except Exception as error:
-            capture_exception(error)
-            logger.exception("Test notification failed")
-            await message.answer("Тестовое уведомление не удалось отправить. Подробности смотри в логах.")
+            if is_transient_network_error(error):
+                logger.warning("Test notification failed because of a transient network error: %s", error)
+                await message.answer("Временная ошибка сети, Telegram или uMap. Попробуй еще раз чуть позже.")
+            else:
+                capture_exception(error)
+                logger.exception("Test notification failed")
+                await message.answer("Тестовое уведомление не удалось отправить. Подробности смотри в логах.")
 
     @dp.message(F.text, F.chat.type == ChatType.PRIVATE)
     async def handle_fallback(message: Message) -> None:
@@ -1279,8 +1376,11 @@ async def watch_loop(service: RouteWatcherService, interval_seconds: int) -> Non
                     len(result.new_features),
                 )
         except Exception as error:
-            capture_exception(error)
-            logger.exception("Scheduled layer check failed")
+            if is_transient_network_error(error):
+                logger.warning("Scheduled layer check skipped after transient network failure: %s", error)
+            else:
+                capture_exception(error)
+                logger.exception("Scheduled layer check failed")
 
         await asyncio.sleep(interval_seconds)
 
@@ -1293,8 +1393,11 @@ async def watch_change_loop(service: RouteWatcherService, interval_seconds: int)
                 layer_changes = changes_by_layer.get(layer.key, [])
                 logger.info("Layer %s route changes checked: changed=%s", layer.title, len(layer_changes))
         except Exception as error:
-            capture_exception(error)
-            logger.exception("Scheduled route change check failed")
+            if is_transient_network_error(error):
+                logger.warning("Scheduled route change check skipped after transient network failure: %s", error)
+            else:
+                capture_exception(error)
+                logger.exception("Scheduled route change check failed")
 
         await asyncio.sleep(interval_seconds)
 
@@ -1321,6 +1424,8 @@ async def run_bot() -> None:
         layer.key: UmapClient(
             datalayer_url=settings.build_datalayer_url(layer.layer_id),
             timeout_seconds=settings.request_timeout_seconds,
+            retry_attempts=settings.request_retry_attempts,
+            retry_backoff_seconds=settings.request_retry_backoff_seconds,
         )
         for layer in settings.watched_layers
     }

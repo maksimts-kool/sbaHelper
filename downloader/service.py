@@ -14,6 +14,7 @@ from dataclasses import dataclass
 
 import sentry_sdk
 from dotenv import load_dotenv
+from telegram.error import NetworkError
 
 
 load_dotenv()
@@ -105,6 +106,58 @@ def extract_supported_url(text: str) -> str | None:
 # --------------------------------------------------------------------------- #
 
 _sentry_initialized = False
+_TRANSIENT_ERROR_TEXT = (
+    "all connection attempts failed",
+    "cannot connect to host",
+    "connection has been closed",
+    "connection reset",
+    "http client says",
+    "readtimeout",
+    "server disconnected",
+    "temporarily unavailable",
+    "timed out",
+    "timeout",
+)
+
+
+def is_transient_network_error(error: BaseException) -> bool:
+    current: BaseException | None = error
+    seen: set[int] = set()
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+
+        if isinstance(current, NetworkError):
+            return True
+
+        text = str(current).lower()
+        if any(marker in text for marker in _TRANSIENT_ERROR_TEXT):
+            return True
+
+        current = current.__cause__ or current.__context__
+
+    return False
+
+
+def _sentry_before_send(event: dict, hint: dict) -> dict | None:
+    exc_info = hint.get("exc_info")
+    if exc_info and len(exc_info) >= 2 and isinstance(exc_info[1], BaseException):
+        if is_transient_network_error(exc_info[1]):
+            return None
+
+    logentry = event.get("logentry")
+    logentry_message = logentry.get("message") if isinstance(logentry, dict) else logentry
+    message = " ".join(
+        str(part)
+        for part in (
+            event.get("message"),
+            logentry_message,
+        )
+        if part
+    ).lower()
+    if message and any(marker in message for marker in _TRANSIENT_ERROR_TEXT):
+        return None
+
+    return event
 
 
 def init_error_tracking(service_name: str) -> bool:
@@ -123,6 +176,7 @@ def init_error_tracking(service_name: str) -> bool:
         environment=SENTRY_ENVIRONMENT or None,
         release=SENTRY_RELEASE or None,
         traces_sample_rate=0.0,
+        before_send=_sentry_before_send,
     )
     sentry_sdk.set_tag("service", service_name)
     _sentry_initialized = True
@@ -131,7 +185,7 @@ def init_error_tracking(service_name: str) -> bool:
 
 
 def capture_exception(error: BaseException) -> None:
-    if _sentry_initialized:
+    if _sentry_initialized and not is_transient_network_error(error):
         sentry_sdk.capture_exception(error)
 
 
