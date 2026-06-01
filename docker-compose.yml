@@ -23,10 +23,11 @@ x-umap-env: &umap-env
   UMAP_STATE_MONGODB_DATABASE: ${UMAP_STATE_MONGODB_DATABASE:-sbahelper}
   UMAP_STATE_MONGODB_COLLECTION: ${UMAP_STATE_MONGODB_COLLECTION:-umap_state}
   UMAP_BASE_URL: ${UMAP_BASE_URL:-https://umap.openstreetmap.fr}
-  UMAP_MAP_ID: ${UMAP_MAP_ID:-1393155}
-  UMAP_LAYER_ID: ${UMAP_LAYER_ID:-82e959ea-1b66-4088-b7f3-8fe6a06c3c4a}
-  UMAP_PLANS_LAYER_ID: ${UMAP_PLANS_LAYER_ID:-}
-  UMAP_MAP_URL: ${UMAP_MAP_URL:-http://u.osmfr.org/m/1393155/}
+  UMAP_BIKE_MAP_ID: ${UMAP_BIKE_MAP_ID:-1393155}
+  UMAP_BIKE_LAYER_ID: ${UMAP_BIKE_LAYER_ID:-82e959ea-1b66-4088-b7f3-8fe6a06c3c4a}
+  UMAP_BIKE_PLANS_LAYER_ID: ${UMAP_BIKE_PLANS_LAYER_ID:-}
+  UMAP_WALK_MAP_ID: ${UMAP_WALK_MAP_ID:-}
+  UMAP_WALK_LAYER_ID: ${UMAP_WALK_LAYER_ID:-}
   POLL_INTERVAL_SECONDS: ${POLL_INTERVAL_SECONDS:-300}
   CHANGE_POLL_INTERVAL_SECONDS: ${CHANGE_POLL_INTERVAL_SECONDS:-3600}
   REQUEST_TIMEOUT_SECONDS: ${REQUEST_TIMEOUT_SECONDS:-30}
@@ -54,7 +55,7 @@ services:
     build: .
     container_name: umap-route-bot
     restart: unless-stopped
-    command: [ "python", "-m", "umap.service" ]
+    command: [ "python", "-m", "umap.watcher" ]
     networks:
       - default
       - shared-db
