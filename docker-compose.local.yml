@@ -19,7 +19,7 @@ x-downloader-volumes: &downloader-volumes
 x-umap-env: &umap-env
   TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN:-}
   DEFAULT_SUBSCRIBER_CHAT_ID: ${DEFAULT_SUBSCRIBER_CHAT_ID:-}
-  UMAP_STATE_MONGODB_URI: ${UMAP_STATE_MONGODB_URI:?UMAP_STATE_MONGODB_URI is required}
+  UMAP_STATE_MONGODB_URI: ${UMAP_STATE_MONGODB_URI:-mongodb://mongodb:27017}
   UMAP_STATE_MONGODB_DATABASE: ${UMAP_STATE_MONGODB_DATABASE:-sbahelper}
   UMAP_STATE_MONGODB_COLLECTION: ${UMAP_STATE_MONGODB_COLLECTION:-umap_state}
   UMAP_BASE_URL: ${UMAP_BASE_URL:-https://umap.openstreetmap.fr}
@@ -40,6 +40,21 @@ x-umap-env: &umap-env
   SENTRY_RELEASE: ${SENTRY_RELEASE:-}
 
 services:
+  mongodb:
+    image: mongo:7
+    container_name: sbahelper-mongodb
+    restart: unless-stopped
+    ports:
+      - "${MONGODB_PORT:-27017}:27017"
+    volumes:
+      - mongodb-data:/data/db
+    healthcheck:
+      test: ["CMD", "mongosh", "--quiet", "--eval", "db.adminCommand('ping').ok"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+
   downloader-bot:
     build: .
     container_name: downloader-bot
@@ -54,12 +69,11 @@ services:
     build: .
     container_name: umap-route-bot
     restart: unless-stopped
-    command: [ "python", "-m", "umap.watcher" ]
-    networks:
-      - default
-      - shared-db
+    command: ["python", "-m", "umap.watcher"]
+    depends_on:
+      mongodb:
+        condition: service_healthy
     environment: *umap-env
 
-networks:
-  shared-db:
-    external: true
+volumes:
+  mongodb-data:

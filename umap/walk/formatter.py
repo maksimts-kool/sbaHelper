@@ -6,12 +6,18 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
 
-from umap.formatting import tg_emojis
-from umap.models import feature_length_km
+from umap.formatting import route_emoji, tg_emojis
+from umap.models import SOURCE_LAYER_TITLE_PROPERTY, feature_length_km
 
 
 PLACEHOLDER_RE = re.compile(r"\((Routes|Transport)\s+(\d+)\)", re.IGNORECASE)
-TRANSPORT_HINT_RE = re.compile(r"\b(bus|train|tram|metro|rail)\b", re.IGNORECASE)
+TRANSPORT_HINT_RE = re.compile(r"\b(bus|train|tram|trolleybus|rail)\b", re.IGNORECASE)
+TRANSPORT_EMOJI_KEYS = {
+    "🚌": "bus",
+    "🚆": "train",
+    "🚋": "tram",
+    "🚎": "trolleybus",
+}
 
 
 @dataclass(frozen=True)
@@ -24,6 +30,32 @@ class RouteLeg:
 
 
 def format_route_notification(layer: Any, feature: Any) -> str:
+    return format_walk_route_message(
+        layer=layer,
+        feature=feature,
+        title=layer.new_notification_title,
+        emojis=layer.new_notification_emojis,
+    )
+
+
+def format_route_change_notification(layer: Any, feature: Any, changes_html: list[str]) -> str:
+    return format_walk_route_message(
+        layer=layer,
+        feature=feature,
+        title=layer.change_notification_title,
+        emojis=layer.change_notification_emojis,
+        changes_html=changes_html,
+    )
+
+
+def format_walk_route_message(
+    *,
+    layer: Any,
+    feature: Any,
+    title: str,
+    emojis: tuple[tuple[str, str], ...],
+    changes_html: list[str] | None = None,
+) -> str:
     properties = feature.properties
     raw_routes = split_values(properties.get("Routes"))
     transports = split_values(properties.get("Transport"))
@@ -41,15 +73,19 @@ def format_route_notification(layer: Any, feature: Any) -> str:
     )
     title_details = " ".join(part for part in (route_date, destination) if part)
 
-    lines = [f"{tg_emojis(layer.new_notification_emojis)} <b>{html.escape(layer.new_notification_title)}</b>"]
+    lines = [f"{tg_emojis(emojis)} <b>{html.escape(title)}</b>"]
     if title_details:
-        lines.append(f"🚩 <b>{escape_text(title_details)}</b>")
+        lines.append(f"{route_emoji('name', '🚩')} <b>{escape_text(title_details)}</b>")
     elif feature.name:
-        lines.append(f"🚩 <b>{html.escape(feature.name)}</b>")
+        lines.append(f"{route_emoji('name', '🚩')} <b>{html.escape(feature.name)}</b>")
+
+    source_layer_title = str(properties.get(SOURCE_LAYER_TITLE_PROPERTY) or "").strip()
+    if source_layer_title:
+        lines.append(f"{route_emoji('vald', '🏘')} <b>Область:</b> {escape_text(source_layer_title)}")
 
     length_km = feature_length_km(feature)
     if length_km:
-        lines.append(f"🛣 <b>Длина:</b> {length_km:.2f} км")
+        lines.append(f"{route_emoji('length', '🛣')} <b>Длина:</b> {length_km:.2f} км")
 
     details = format_walk_details_block(legs)
     notes = str(properties.get("notes") or properties.get("Notes") or "").strip()
@@ -57,10 +93,14 @@ def format_route_notification(layer: Any, feature: Any) -> str:
         lines.extend(["", "<b>Детали:</b>", f"<blockquote expandable>{details}</blockquote>"])
     elif raw_routes:
         routes = [strip_transport_hints(route) for route in raw_routes]
-        lines.extend(["", f"🗺 <b>{escape_text(', '.join(routes))}</b>"])
+        lines.extend(["", f"{route_emoji('routes', '🗺')} <b>{escape_text(', '.join(routes))}</b>"])
 
     if notes:
-        lines.extend(["", f"📝 {escape_text(notes)}"])
+        lines.extend(["", f"{route_emoji('notes', '📝')} {escape_text(notes)}"])
+
+    if changes_html:
+        lines.extend(["", f"{route_emoji('changes', '🔄')} <b>Что изменилось:</b>"])
+        lines.extend(changes_html)
 
     return "\n".join(lines).strip()
 
@@ -177,7 +217,7 @@ def format_walk_details_block(legs: list[RouteLeg]) -> str:
 
     parts: list[str] = []
     if there:
-        parts.append("🚶 <b>Туда:</b>")
+        parts.append(f"{route_emoji('there', '🚶')} <b>Туда:</b>")
         parts.append("")
         parts.extend(format_walk_leg_lines(there))
 
@@ -187,7 +227,7 @@ def format_walk_details_block(legs: list[RouteLeg]) -> str:
         parts.append("")
 
     if back:
-        parts.append("🏠 <b>Обратно:</b>")
+        parts.append(f"{route_emoji('back', '🏠')} <b>Обратно:</b>")
         parts.append("")
         parts.extend(format_walk_leg_lines(back))
 
@@ -199,11 +239,13 @@ def format_walk_leg_lines(legs: list[RouteLeg]) -> list[str]:
     for index, leg in enumerate(legs):
         if index:
             lines.append("")
-        lines.append(f"{leg.emoji} <b>{escape_text(leg.route)}</b>")
+        emoji = format_leg_emoji(leg.emoji)
+        title = f"<b>{escape_text(leg.route)}</b>"
+        lines.append(f"{emoji} {title}" if emoji else title)
         if leg.path:
-            lines.append(f"📍 {escape_text(leg.path)}")
+            lines.append(f"{route_emoji('path', '📍')} {escape_text(leg.path)}")
         if leg.duration:
-            lines.append(f"⏱ {escape_text(leg.duration)}")
+            lines.append(f"{route_emoji('duration', '⏱')} {escape_text(leg.duration)}")
     return lines
 
 
@@ -261,15 +303,19 @@ def strip_transport_hints(value: str) -> str:
 
 def transport_emoji(line: str) -> str:
     lower = line.lower()
+    if "trolleybus" in lower:
+        return "🚎"
     if "train" in lower or "rail" in lower or re.search(r"\br\d+", lower):
         return "🚆"
     if "bus" in lower:
         return "🚌"
     if "tram" in lower:
         return "🚋"
-    if "metro" in lower:
-        return "🚇"
-    return "➡️"
+    return ""
+
+
+def format_leg_emoji(emoji: str) -> str:
+    return route_emoji(TRANSPORT_EMOJI_KEYS.get(emoji, "transport"), emoji)
 
 
 def escape_text(value: str) -> str:
@@ -282,6 +328,6 @@ def _looks_like_duration(line: str) -> bool:
 
 def _looks_like_transport_leg(line: str) -> bool:
     lower = line.lower()
-    if any(token in lower for token in ("bus", "train", "tram", "metro")):
+    if any(token in lower for token in ("bus", "train", "tram", "trolleybus")):
         return True
     return " - " in line and bool(re.search(r"\b(r\d+|\d+[a-z]?)\b\s+-", lower))

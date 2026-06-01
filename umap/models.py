@@ -8,6 +8,10 @@ from datetime import datetime, timezone
 from typing import Any
 
 
+SOURCE_LAYER_ID_PROPERTY = "_umap_layer_id"
+SOURCE_LAYER_TITLE_PROPERTY = "_umap_layer_title"
+
+
 def utc_now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
@@ -17,15 +21,54 @@ def collect_geojson_features(umap_data: dict[str, Any]) -> list[dict[str, Any]]:
     raw_features: list[dict[str, Any]] = []
 
     if umap_data.get("type") == "FeatureCollection":
-        raw_features.extend(umap_data.get("features", []))
+        raw_features.extend(
+            _tag_features_with_layer(
+                umap_data.get("features", []),
+                layer_id=umap_data.get("id"),
+                layer_title=(umap_data.get("properties") or {}).get("name"),
+            )
+        )
     elif umap_data.get("type") == "Feature":
-        raw_features.append(umap_data)
+        if not isinstance((umap_data.get("properties") or {}).get("datalayers"), list):
+            raw_features.append(umap_data)
     elif "layers" in umap_data:
         for layer in umap_data.get("layers", []):
             if isinstance(layer, dict):
-                raw_features.extend(layer.get("features", []))
+                layer_properties = layer.get("properties") or {}
+                raw_features.extend(
+                    _tag_features_with_layer(
+                        layer.get("features", []),
+                        layer_id=layer.get("id"),
+                        layer_title=layer.get("name") or layer_properties.get("name"),
+                    )
+                )
 
     return [feature for feature in raw_features if isinstance(feature, dict)]
+
+
+def _tag_features_with_layer(
+    features: Any,
+    *,
+    layer_id: Any,
+    layer_title: Any,
+) -> list[dict[str, Any]]:
+    tagged_features: list[dict[str, Any]] = []
+    source_layer_id = str(layer_id or "").strip()
+    source_layer_title = str(layer_title or "").strip()
+
+    for feature in features if isinstance(features, list) else []:
+        if not isinstance(feature, dict):
+            continue
+        tagged_feature = dict(feature)
+        properties = dict(tagged_feature.get("properties") or {})
+        if source_layer_id:
+            properties.setdefault(SOURCE_LAYER_ID_PROPERTY, source_layer_id)
+        if source_layer_title:
+            properties.setdefault(SOURCE_LAYER_TITLE_PROPERTY, source_layer_title)
+        tagged_feature["properties"] = properties
+        tagged_features.append(tagged_feature)
+
+    return tagged_features
 
 
 @dataclass(slots=True)

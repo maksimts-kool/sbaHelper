@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import os
-import re
 from dataclasses import dataclass
 
 
@@ -42,6 +41,8 @@ class BotSettings:
 
     def build_datalayer_url(self, layer: WatchedLayer) -> str:
         base = self.umap_base_url.rstrip("/")
+        if not layer.layer_id:
+            return f"{base}/en/map/{layer.map_id}/geojson/"
         return f"{base}/en/datalayer/{layer.map_id}/{layer.layer_id}/"
 
 
@@ -63,92 +64,6 @@ def required_env(name: str) -> str:
     return value
 
 
-def _split_env_list(raw_value: str) -> list[str]:
-    if len(raw_value) >= 2 and raw_value[0] == raw_value[-1] and raw_value[0] in {"'", '"'}:
-        raw_value = raw_value[1:-1].strip()
-    delimiter = ";" if ";" in raw_value else ","
-    return [part.strip() for part in raw_value.split(delimiter) if part.strip()]
-
-
-def _parse_named_layer_list(raw_value: str) -> list[tuple[str, str]]:
-    layers: list[tuple[str, str]] = []
-    for index, item in enumerate(_split_env_list(raw_value), start=1):
-        if "=" in item:
-            title, layer_id = item.split("=", 1)
-            title = title.strip()
-            layer_id = layer_id.strip()
-        else:
-            title = f"Пешие маршруты {index}"
-            layer_id = item.strip()
-
-        if layer_id:
-            layers.append((title or f"Пешие маршруты {index}", layer_id))
-
-    return layers
-
-
-def _layer_key_suffix(layer_id: str, index: int) -> str:
-    normalized = re.sub(r"[^a-z0-9]+", "-", layer_id.lower()).strip("-")
-    return normalized[:12] or str(index)
-
-
-def _build_walk_layers(
-    *,
-    walk_map_id: str,
-    walk_map_url: str,
-    primary_walk_layer_id: str,
-    configured_walk_layers: str,
-) -> list[WatchedLayer]:
-    if configured_walk_layers:
-        layer_specs = _parse_named_layer_list(configured_walk_layers)
-    elif primary_walk_layer_id:
-        layer_specs = [("Пешие маршруты", primary_walk_layer_id)]
-    else:
-        layer_specs = []
-
-    watched_layers: list[WatchedLayer] = []
-    used_keys: set[str] = set()
-    primary_key_assigned = False
-
-    for index, (title, layer_id) in enumerate(layer_specs, start=1):
-        if not walk_map_id:
-            continue
-
-        is_primary = (
-            bool(primary_walk_layer_id)
-            and layer_id == primary_walk_layer_id
-            and not primary_key_assigned
-        ) or (not primary_walk_layer_id and index == 1)
-        base_key = "walk" if is_primary else f"walk-{_layer_key_suffix(layer_id, index)}"
-        key = base_key
-        duplicate_index = 2
-        while key in used_keys:
-            key = f"{base_key}-{duplicate_index}"
-            duplicate_index += 1
-
-        used_keys.add(key)
-        if key == "walk":
-            primary_key_assigned = True
-
-        watched_layers.append(
-            WatchedLayer(
-                key=key,
-                title=title,
-                map_id=walk_map_id,
-                map_url=walk_map_url,
-                layer_id=layer_id,
-                formatter="walk",
-                route_label="пеший маршрут",
-                new_notification_title="Новый пеший маршрут добавлен!",
-                change_notification_title="Изменен пеший маршрут!",
-                new_notification_emojis=(("5397916757333654639", "➕"),),
-                change_notification_emojis=(("5395444784611480792", "✏️"),),
-            )
-        )
-
-    return watched_layers
-
-
 def load_bot_settings() -> BotSettings:
     chat_id = env("DEFAULT_SUBSCRIBER_CHAT_ID")
     bike_map_id = env("UMAP_BIKE_MAP_ID") or "1393155"
@@ -156,8 +71,6 @@ def load_bot_settings() -> BotSettings:
     bike_layer_id = env("UMAP_BIKE_LAYER_ID") or "82e959ea-1b66-4088-b7f3-8fe6a06c3c4a"
     walk_map_id = env("UMAP_WALK_MAP_ID")
     walk_map_url = f"http://u.osmfr.org/m/{walk_map_id}/" if walk_map_id else ""
-    walk_layer_id = env("UMAP_WALK_LAYER_ID")
-    walk_layers = env("UMAP_WALK_LAYERS")
     plans_layer_id = env("UMAP_BIKE_PLANS_LAYER_ID")
 
     watched_layers = [
@@ -175,14 +88,22 @@ def load_bot_settings() -> BotSettings:
             change_notification_emojis=(("5395444784611480792", "✏️"),),
         )
     ]
-    watched_layers.extend(
-        _build_walk_layers(
-            walk_map_id=walk_map_id,
-            walk_map_url=walk_map_url,
-            primary_walk_layer_id=walk_layer_id,
-            configured_walk_layers=walk_layers,
+    if walk_map_id:
+        watched_layers.append(
+            WatchedLayer(
+                key="walk",
+                title="Пешие маршруты",
+                map_id=walk_map_id,
+                map_url=walk_map_url,
+                layer_id="",
+                formatter="walk",
+                route_label="пеший маршрут",
+                new_notification_title="Новый пеший маршрут добавлен!",
+                change_notification_title="Изменен пеший маршрут!",
+                new_notification_emojis=(("5397916757333654639", "➕"),),
+                change_notification_emojis=(("5395444784611480792", "✏️"),),
+            )
         )
-    )
     if plans_layer_id:
         watched_layers.append(
             WatchedLayer(

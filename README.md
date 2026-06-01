@@ -50,8 +50,7 @@ For the uMap route bot, fill in:
 - `UMAP_STATE_MONGODB_URI`
 - `UMAP_BIKE_MAP_ID` and `UMAP_BIKE_LAYER_ID`
 - `UMAP_BIKE_PLANS_LAYER_ID`, if you want to watch the bike plans layer too
-- `UMAP_WALK_MAP_ID` and `UMAP_WALK_LAYER_ID`, if you want to watch one walking layer
-- `UMAP_WALK_LAYERS`, if you want to watch multiple walking layers, as `Layer title=layer-id;Other title=other-layer-id`
+- `UMAP_WALK_MAP_ID`, if you want to watch walking routes. The bot fetches every datalayer in that map and adds the source vald/layer title to each notification.
 
 Map links are built from `UMAP_BIKE_MAP_ID` and `UMAP_WALK_MAP_ID`.
 
@@ -60,6 +59,18 @@ Put cookie files in `downloader/cookies/`. `COOKIES_FILE` is used for TikTok/Fac
 The uMap bot stores its state only in MongoDB. `UMAP_STATE_MONGODB_URI` is required.
 
 ## Commands
+
+For local development, use the local compose file. It starts MongoDB in the
+same project and stores data in the `mongodb-data` Docker volume, so you do not
+need to set `UMAP_STATE_MONGODB_URI` unless you want to point at another
+database:
+
+```powershell
+docker compose -f docker-compose.local.yml up --build -d
+```
+
+The default `docker-compose.yml` is intended for the Portainer deployment where
+MongoDB is already available on the external `shared-db` network.
 
 ```powershell
 docker compose up --build -d
