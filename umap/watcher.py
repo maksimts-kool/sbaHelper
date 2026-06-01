@@ -370,6 +370,14 @@ class RouteWatcherService:
                 f"{html.escape(self._display_value(current.osmand_speed, 'не указана'))}"
             )
 
+        if previous.planned != current.planned:
+            changes.append(
+                "• В планах: "
+                f"<s>{self._format_bool(previous.planned)}</s> "
+                f"{tg_emoji(CHANGED_VALUE_EMOJI_ID, '▫️')} "
+                f"{self._format_bool(current.planned)}"
+            )
+
         if previous.description != current.description:
             changes.append(
                 "• Описание: "
@@ -418,6 +426,10 @@ class RouteWatcherService:
         if value is None:
             return "неизвестно"
         return f"{value:.1f} км"
+
+    @staticmethod
+    def _format_bool(value: bool) -> str:
+        return "да" if value else "нет"
 
     def _known_feature_count(self, layer: WatchedLayer) -> int:
         return sum(

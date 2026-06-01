@@ -11,7 +11,13 @@ from urllib.parse import urlsplit, urlunsplit
 import httpx
 
 from umap.errors import is_transient_network_error
-from umap.models import SOURCE_LAYER_ID_PROPERTY, RouteFeature, collect_geojson_features
+from umap.models import (
+    PLANNED_PROPERTY,
+    SOURCE_LAYER_ID_PROPERTY,
+    RouteFeature,
+    collect_geojson_features,
+    property_bool,
+)
 
 
 logger = logging.getLogger(__name__)
@@ -128,4 +134,5 @@ def parse_umap_feature(feature: dict[str, Any], *, scope_source_layer: bool = Fa
         geometry_type=str(geometry.get("type") or "Unknown"),
         geometry=geometry,
         properties=properties,
+        planned=property_bool(properties, PLANNED_PROPERTY),
     )

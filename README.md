@@ -98,6 +98,7 @@ Bike/plans notifications use the default formatter in `umap/formatting.py`.
 Walking notifications are formatted separately:
 
 - `umap/walk/formatter.py` handles walking route details from structured fields like `there_1_from`, `there_1_to`, `there_1_minutes`, `there_1_route`, and matching `back_*` fields. It still supports the legacy `Instruction` placeholder format while the data is being migrated.
+- Walking features with a checked `planned` property use the same planned-route notification titles/emojis as the bike plans layer.
 
 ## Error Tracking
 

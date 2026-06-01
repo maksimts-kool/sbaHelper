@@ -4,7 +4,12 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 from umap.formatting import build_feature_url, format_route_change_notification, route_emoji
-from umap.models import SOURCE_LAYER_ID_PROPERTY, SOURCE_LAYER_TITLE_PROPERTY, collect_geojson_features
+from umap.models import (
+    SOURCE_LAYER_ID_PROPERTY,
+    SOURCE_LAYER_TITLE_PROPERTY,
+    collect_geojson_features,
+    property_bool,
+)
 from umap.settings import load_bot_settings
 from umap.walk.formatter import format_route_notification, replace_placeholders, transport_emoji
 
@@ -145,6 +150,32 @@ class UmapFormattingTest(unittest.TestCase):
         self.assertIn("🚌 <b>12</b>", message)
         self.assertIn(f"{route_emoji('changes', '🔄')} <b>Что изменилось:</b>", message)
         self.assertIn("• Детали маршрута обновлены.", message)
+
+    def test_walk_formatter_uses_planned_title_for_planned_checkbox(self) -> None:
+        feature = SimpleNamespace(
+            feature_id="abc",
+            name="Kivimurru",
+            description="",
+            month="",
+            osmand_speed="",
+            geometry_type="LineString",
+            geometry={"type": "LineString", "coordinates": []},
+            properties={
+                "planned": True,
+                "date": "2026-05-31",
+                "name": "Kivimurru",
+            },
+        )
+
+        message = format_route_notification(make_layer("walk"), feature)
+
+        self.assertIn("Новый план маршрута добавлен", message)
+        self.assertNotIn("Новый пеший маршрут добавлен!", message)
+
+    def test_planned_checkbox_parser_accepts_umap_truthy_values(self) -> None:
+        self.assertTrue(property_bool({"planned": "true"}, "planned"))
+        self.assertTrue(property_bool({"Planned": "on"}, "planned"))
+        self.assertFalse(property_bool({"planned": "false"}, "planned"))
 
     def test_collect_geojson_features_from_umap_download(self) -> None:
         data = {

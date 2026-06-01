@@ -10,6 +10,8 @@ from typing import Any
 
 SOURCE_LAYER_ID_PROPERTY = "_umap_layer_id"
 SOURCE_LAYER_TITLE_PROPERTY = "_umap_layer_title"
+PLANNED_PROPERTY = "planned"
+TRUTHY_PROPERTY_VALUES = {"1", "true", "yes", "y", "on", "checked"}
 
 
 def utc_now_iso() -> str:
@@ -81,6 +83,7 @@ class RouteFeature:
     geometry_type: str
     geometry: dict[str, Any]
     properties: dict[str, Any]
+    planned: bool = False
 
 
 @dataclass(slots=True)
@@ -94,6 +97,7 @@ class RouteSnapshot:
     geometry_hash: str
     details_hash: str
     length_km: float | None
+    planned: bool = False
 
     @classmethod
     def from_feature(cls, feature: RouteFeature) -> "RouteSnapshot":
@@ -107,6 +111,7 @@ class RouteSnapshot:
             geometry_hash=feature_geometry_hash(feature),
             details_hash=feature_details_hash(feature),
             length_km=feature_length_km(feature),
+            planned=feature.planned,
         )
 
     def to_dict(self) -> dict[str, Any]:
@@ -120,6 +125,7 @@ class RouteSnapshot:
             "geometry_hash": self.geometry_hash,
             "details_hash": self.details_hash,
             "length_km": self.length_km,
+            "planned": self.planned,
         }
 
     @classmethod
@@ -134,6 +140,7 @@ class RouteSnapshot:
             geometry_hash=str(data.get("geometry_hash") or ""),
             details_hash=str(data.get("details_hash") or ""),
             length_km=float(data["length_km"]) if data.get("length_km") is not None else None,
+            planned=property_bool(data, "planned"),
         )
 
 
@@ -191,6 +198,19 @@ def feature_geometry_hash(feature: RouteFeature) -> str:
 def feature_details_hash(feature: RouteFeature) -> str:
     payload = json.dumps(feature.properties, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
     return hashlib.sha1(payload.encode("utf-8")).hexdigest()
+
+
+def property_bool(properties: dict[str, Any], *names: str) -> bool:
+    lower_properties = {str(key).lower(): value for key, value in properties.items()}
+    for name in names:
+        value = lower_properties.get(name.lower())
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, (int, float)):
+            return value != 0
+        if value is not None and str(value).strip().lower() in TRUTHY_PROPERTY_VALUES:
+            return True
+    return False
 
 
 def _coordinate_pair(value: Any) -> tuple[float, float] | None:

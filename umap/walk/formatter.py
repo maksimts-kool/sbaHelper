@@ -7,11 +7,23 @@ from datetime import datetime
 from typing import Any
 
 from umap.formatting import route_emoji, tg_emojis
-from umap.models import SOURCE_LAYER_TITLE_PROPERTY, feature_length_km
+from umap.models import (
+    PLANNED_PROPERTY,
+    SOURCE_LAYER_TITLE_PROPERTY,
+    feature_length_km,
+    property_bool,
+)
 
 
 PLACEHOLDER_RE = re.compile(r"\((Routes|Transport)\s+(\d+)\)", re.IGNORECASE)
 TRANSPORT_HINT_RE = re.compile(r"\b(bus|train|tram|trolleybus|rail)\b", re.IGNORECASE)
+PLANNED_NEW_NOTIFICATION_TITLE = "Новый план маршрута добавлен"
+PLANNED_CHANGE_NOTIFICATION_TITLE = "Изменен план маршрута"
+PLANNED_NEW_NOTIFICATION_EMOJIS = (("5958798052641738769", "📱"),)
+PLANNED_CHANGE_NOTIFICATION_EMOJIS = (
+    ("5395444784611480792", "✏️"),
+    ("5958798052641738769", "📱"),
+)
 TRANSPORT_EMOJI_KEYS = {
     "🚌": "bus",
     "🚆": "train",
@@ -33,8 +45,8 @@ def format_route_notification(layer: Any, feature: Any) -> str:
     return format_walk_route_message(
         layer=layer,
         feature=feature,
-        title=layer.new_notification_title,
-        emojis=layer.new_notification_emojis,
+        title=walk_notification_title(layer, feature, change=False),
+        emojis=walk_notification_emojis(layer, feature, change=False),
     )
 
 
@@ -42,10 +54,29 @@ def format_route_change_notification(layer: Any, feature: Any, changes_html: lis
     return format_walk_route_message(
         layer=layer,
         feature=feature,
-        title=layer.change_notification_title,
-        emojis=layer.change_notification_emojis,
+        title=walk_notification_title(layer, feature, change=True),
+        emojis=walk_notification_emojis(layer, feature, change=True),
         changes_html=changes_html,
     )
+
+
+def walk_notification_title(layer: Any, feature: Any, *, change: bool) -> str:
+    if is_planned_walk_route(feature):
+        return PLANNED_CHANGE_NOTIFICATION_TITLE if change else PLANNED_NEW_NOTIFICATION_TITLE
+    return layer.change_notification_title if change else layer.new_notification_title
+
+
+def walk_notification_emojis(layer: Any, feature: Any, *, change: bool) -> tuple[tuple[str, str], ...]:
+    if is_planned_walk_route(feature):
+        return PLANNED_CHANGE_NOTIFICATION_EMOJIS if change else PLANNED_NEW_NOTIFICATION_EMOJIS
+    return layer.change_notification_emojis if change else layer.new_notification_emojis
+
+
+def is_planned_walk_route(feature: Any) -> bool:
+    if getattr(feature, "planned", False):
+        return True
+    properties = getattr(feature, "properties", {})
+    return isinstance(properties, dict) and property_bool(properties, PLANNED_PROPERTY)
 
 
 def format_walk_route_message(
