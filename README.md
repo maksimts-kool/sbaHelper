@@ -50,7 +50,8 @@ For the uMap route bot, fill in:
 - `UMAP_STATE_MONGODB_URI`
 - `UMAP_BIKE_MAP_ID` and `UMAP_BIKE_LAYER_ID`
 - `UMAP_BIKE_PLANS_LAYER_ID`, if you want to watch the bike plans layer too
-- `UMAP_WALK_MAP_ID` and `UMAP_WALK_LAYER_ID`, if you want to watch walking routes too
+- `UMAP_WALK_MAP_ID` and `UMAP_WALK_LAYER_ID`, if you want to watch one walking layer
+- `UMAP_WALK_LAYERS`, if you want to watch multiple walking layers, as `Layer title=layer-id;Other title=other-layer-id`
 
 Map links are built from `UMAP_BIKE_MAP_ID` and `UMAP_WALK_MAP_ID`.
 

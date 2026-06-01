@@ -145,6 +145,36 @@ class UmapFormattingTest(unittest.TestCase):
         self.assertEqual(layers["plans"].map_id, "bike-map")
         self.assertEqual(layers["plans"].layer_id, "plans-layer")
 
+    def test_settings_support_multiple_walk_layers(self) -> None:
+        with patch.dict(
+            environ,
+            {
+                "TELEGRAM_BOT_TOKEN": "token",
+                "UMAP_STATE_MONGODB_URI": "mongodb://example",
+                "UMAP_BIKE_MAP_ID": "bike-map",
+                "UMAP_BIKE_LAYER_ID": "bike-layer",
+                "UMAP_WALK_MAP_ID": "walk-map",
+                "UMAP_WALK_LAYER_ID": "raasiku-layer",
+                "UMAP_WALK_LAYERS": (
+                    '"'
+                    "Raasiku vald=raasiku-layer;"
+                    "Saue vald=saue-layer;"
+                    "Tallinn=tallinn-layer"
+                    '"'
+                ),
+            },
+            clear=True,
+        ):
+            settings = load_bot_settings()
+
+        layers = {layer.key: layer for layer in settings.watched_layers}
+
+        self.assertEqual(layers["walk"].title, "Raasiku vald")
+        self.assertEqual(layers["walk"].layer_id, "raasiku-layer")
+        self.assertEqual(layers["walk-saue-layer"].title, "Saue vald")
+        self.assertEqual(layers["walk-saue-layer"].formatter, "walk")
+        self.assertEqual(layers["walk-tallinn-laye"].layer_id, "tallinn-layer")
+
 
 if __name__ == "__main__":
     unittest.main()
