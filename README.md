@@ -76,7 +76,7 @@ MongoDB is already available on the external `shared-db` network.
 docker compose up --build -d
 ```
 
-The bot container runs the three link checks before polling Telegram. With `STARTUP_CHECKS_REQUIRED=1`, failed checks stop startup.
+The bot container runs the three link checks before polling Telegram. With `STARTUP_CHECKS_REQUIRED=1`, invalid check configuration still stops startup; known unsupported content and flaky provider responses are reported as warnings.
 
 The uMap container runs uMap endpoint checks before polling Telegram. With `UMAP_STARTUP_CHECKS_REQUIRED=1`, failed checks stop startup.
 

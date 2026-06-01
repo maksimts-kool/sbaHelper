@@ -210,6 +210,7 @@ class LinkCheckResult:
     ok: bool
     message: str
     info: object | None = None
+    blocks_startup: bool = True
 
 
 def configured_checks() -> list[LinkCheck]:
@@ -221,7 +222,7 @@ def configured_checks() -> list[LinkCheck]:
 
 
 def run_check(check: LinkCheck) -> LinkCheckResult:
-    from downloader.core import DownloadError, fetch_info
+    from downloader.core import DownloadError, UnsupportedContentError, fetch_info
 
     if not check.url:
         return LinkCheckResult(check.service, False, "missing url")
@@ -232,9 +233,18 @@ def run_check(check: LinkCheck) -> LinkCheckResult:
 
     try:
         info = fetch_info(supported_url)
+    except UnsupportedContentError as error:
+        return LinkCheckResult(check.service, False, str(error), blocks_startup=False)
     except DownloadError as error:
-        capture_exception(error)
-        return LinkCheckResult(check.service, False, str(error))
+        blocks_startup = not is_nonblocking_check_error(check, error)
+        if blocks_startup:
+            capture_exception(error)
+        return LinkCheckResult(
+            check.service,
+            False,
+            str(error),
+            blocks_startup=blocks_startup,
+        )
     except Exception as error:
         capture_exception(error)
         logger.exception("Unexpected check error for %s", check.service)
@@ -245,6 +255,7 @@ def run_check(check: LinkCheck) -> LinkCheckResult:
         True,
         f"{info.title} by {info.uploader} ({info.duration}s)",
         info,
+        blocks_startup=False,
     )
 
 
@@ -252,16 +263,26 @@ def run_checks() -> list[LinkCheckResult]:
     return [run_check(check) for check in configured_checks()]
 
 
+def is_nonblocking_check_error(check: LinkCheck, error: BaseException) -> bool:
+    if is_transient_network_error(error):
+        return True
+
+    message = str(error).lower()
+    return check.service == "tiktok" and (
+        "http error 403" in message or "forbidden" in message
+    )
+
+
 def print_results(results: list[LinkCheckResult]) -> None:
     for result in results:
-        status = "OK" if result.ok else "FAIL"
+        status = "OK" if result.ok else "FAIL" if result.blocks_startup else "WARN"
         print(f"{status} {result.service}: {result.message}")
 
 
 def result_exit_code(results: list[LinkCheckResult]) -> int:
     if any(result.message == "missing url" for result in results):
         return 2
-    if any(not result.ok for result in results):
+    if any(not result.ok and result.blocks_startup for result in results):
         return 1
     return 0
 
