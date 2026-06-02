@@ -43,7 +43,7 @@ def _install_runtime_stubs() -> None:
 
 _install_runtime_stubs()
 
-from downloader.core import DownloadError, UnsupportedContentError
+from downloader.core import DownloadError, UnsupportedContentError, _file_has_audio_stream
 from downloader.service import LinkCheck, LinkCheckResult, print_results, result_exit_code, run_check
 from downloader.ytdlp_options import get_format_selector
 
@@ -102,9 +102,27 @@ class DownloaderStartupChecksTest(unittest.TestCase):
         selector = get_format_selector("https://www.tiktok.com/@user/video/123")
         choices = selector.split("/")
 
-        self.assertIn("+bestaudio", choices[0])
+        self.assertIn("[vcodec=h264]", choices[0])
+        self.assertIn("[filesize<", choices[0])
         self.assertIn("[acodec!=none]", selector)
-        self.assertLess(selector.index("+bestaudio"), selector.index("best[ext=mp4]"))
+        self.assertIn("+bestaudio", selector)
+        self.assertLess(selector.index("[vcodec=h264]"), selector.index("+bestaudio"))
+
+    def test_audio_stream_probe_detects_audio(self) -> None:
+        with patch(
+            "downloader.core.subprocess.run",
+            return_value=types.SimpleNamespace(
+                stdout='{"streams":[{"codec_type":"video"},{"codec_type":"audio"}]}'
+            ),
+        ):
+            self.assertTrue(_file_has_audio_stream("/tmp/video.mp4"))
+
+    def test_audio_stream_probe_detects_missing_audio(self) -> None:
+        with patch(
+            "downloader.core.subprocess.run",
+            return_value=types.SimpleNamespace(stdout='{"streams":[{"codec_type":"video"}]}'),
+        ):
+            self.assertFalse(_file_has_audio_stream("/tmp/video.mp4"))
 
 
 if __name__ == "__main__":

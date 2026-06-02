@@ -5,7 +5,7 @@ import os
 from collections.abc import Callable
 
 from downloader.platforms import is_facebook_url, is_tiktok_url, is_youtube_url
-from downloader.service import COOKIES_FILE, YOUTUBE_COOKIES_FILE
+from downloader.service import COOKIES_FILE, MAX_FILE_SIZE_MB, YOUTUBE_COOKIES_FILE
 
 
 logger = logging.getLogger(__name__)
@@ -105,7 +105,12 @@ def get_format_selector(url: str) -> str:
         )
 
     if is_tiktok_url(url):
+        size_limit = f"{MAX_FILE_SIZE_MB}M"
         return (
+            f"best[ext=mp4][height<=1080][vcodec=h264][acodec!=none][filesize<{size_limit}]/"
+            f"best[ext=mp4][height<=1080][vcodec=h264][acodec!=none][filesize_approx<{size_limit}]/"
+            "best[ext=mp4][height<=1080][vcodec=h264][acodec!=none]/"
+            "best[height<=1080][vcodec=h264][acodec!=none]/"
             "bestvideo[ext=mp4][height<=1080][vcodec!=none]+bestaudio[ext=m4a]/"
             "bestvideo[height<=1080][vcodec!=none]+bestaudio/"
             "best[ext=mp4][height<=1080][vcodec!=none][acodec!=none]/"

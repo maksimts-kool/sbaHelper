@@ -2,8 +2,10 @@
 Ядро загрузки видео.
 Использует yt-dlp для скачивания видео с TikTok / YouTube Shorts / Facebook.
 """
+import json
 import logging
 import os
+import subprocess
 import time
 import uuid
 from typing import Callable
@@ -12,7 +14,7 @@ import yt_dlp
 
 from downloader.metadata import normalize_video_info
 from downloader.models import DownloadResult, VideoInfo
-from downloader.platforms import is_facebook_url
+from downloader.platforms import is_facebook_url, is_tiktok_url
 from downloader.service import (
     DOWNLOAD_DIR,
     MAX_DURATION_SEC,
@@ -64,6 +66,38 @@ class UnsupportedContentError(DownloadError):
 def _ensure_dir() -> str:
     os.makedirs(DOWNLOAD_DIR, exist_ok=True)
     return DOWNLOAD_DIR
+
+
+def _file_has_audio_stream(file_path: str) -> bool | None:
+    try:
+        result = subprocess.run(
+            [
+                "ffprobe",
+                "-hide_banner",
+                "-loglevel",
+                "error",
+                "-show_entries",
+                "stream=codec_type",
+                "-of",
+                "json",
+                file_path,
+            ],
+            capture_output=True,
+            check=True,
+            text=True,
+            timeout=10,
+        )
+    except (FileNotFoundError, subprocess.SubprocessError) as e:
+        logger.warning("Could not inspect audio streams with ffprobe for %s: %s", file_path, e)
+        return None
+
+    try:
+        data = json.loads(result.stdout or "{}")
+    except json.JSONDecodeError as e:
+        logger.warning("Could not parse ffprobe output for %s: %s", file_path, e)
+        return None
+
+    return any(stream.get("codec_type") == "audio" for stream in data.get("streams") or [])
 
 
 def _rewrite_download_error(url: str, err_msg: str) -> str:
@@ -222,6 +256,13 @@ def download_video(
 
     if not downloaded_file or not os.path.exists(downloaded_file):
         raise DownloadError("Не удалось найти скачанный файл.")
+
+    has_audio = _file_has_audio_stream(downloaded_file)
+    if is_tiktok_url(url) and has_audio is False:
+        os.remove(downloaded_file)
+        raise DownloadError(
+            "Не удалось скачать TikTok со звуком: полученный файл не содержит аудиодорожку."
+        )
 
     size_mb = os.path.getsize(downloaded_file) / (1024 * 1024)
     if size_mb > MAX_FILE_SIZE_MB:
