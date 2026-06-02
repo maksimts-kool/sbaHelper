@@ -105,7 +105,13 @@ def get_format_selector(url: str) -> str:
         )
 
     if is_tiktok_url(url):
-        return "best[ext=mp4][height<=1080]/best[height<=1080]/best"
+        return (
+            "bestvideo[ext=mp4][height<=1080][vcodec!=none]+bestaudio[ext=m4a]/"
+            "bestvideo[height<=1080][vcodec!=none]+bestaudio/"
+            "best[ext=mp4][height<=1080][vcodec!=none][acodec!=none]/"
+            "best[height<=1080][vcodec!=none][acodec!=none]/"
+            "best[ext=mp4][height<=1080]/best[height<=1080]/best"
+        )
 
     return (
         "bestvideo[height<=1080][vcodec!=none]+bestaudio/"

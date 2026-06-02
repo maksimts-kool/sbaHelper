@@ -45,6 +45,7 @@ _install_runtime_stubs()
 
 from downloader.core import DownloadError, UnsupportedContentError
 from downloader.service import LinkCheck, LinkCheckResult, print_results, result_exit_code, run_check
+from downloader.ytdlp_options import get_format_selector
 
 
 class DownloaderStartupChecksTest(unittest.TestCase):
@@ -96,6 +97,14 @@ class DownloaderStartupChecksTest(unittest.TestCase):
                 "FAIL youtube: missing url",
             ],
         )
+
+    def test_tiktok_download_selector_prefers_audio_bearing_formats(self) -> None:
+        selector = get_format_selector("https://www.tiktok.com/@user/video/123")
+        choices = selector.split("/")
+
+        self.assertIn("+bestaudio", choices[0])
+        self.assertIn("[acodec!=none]", selector)
+        self.assertLess(selector.index("+bestaudio"), selector.index("best[ext=mp4]"))
 
 
 if __name__ == "__main__":
