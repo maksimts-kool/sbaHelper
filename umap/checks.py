@@ -4,6 +4,7 @@ import asyncio
 import logging
 from dataclasses import dataclass
 
+from sbahelper.startup import print_results as print_startup_results
 from umap.client import UmapClient
 from umap.errors import capture_exception
 from umap.settings import BotSettings, WatchedLayer, load_bot_settings
@@ -18,6 +19,7 @@ class UmapCheckResult:
     name: str
     ok: bool
     message: str
+    blocks_startup: bool = True
 
 
 async def _check_layer(settings: BotSettings, layer: WatchedLayer) -> UmapCheckResult:
@@ -82,9 +84,7 @@ async def run_checks() -> list[UmapCheckResult]:
 
 
 def print_results(results: list[UmapCheckResult]) -> None:
-    for result in results:
-        status = "OK" if result.ok else "FAIL"
-        print(f"{status} {result.name}: {result.message}")
+    print_startup_results(results)
 
 
 def result_exit_code(results: list[UmapCheckResult]) -> int:

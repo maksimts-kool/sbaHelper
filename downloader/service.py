@@ -12,9 +12,12 @@ import os
 import re
 from dataclasses import dataclass
 
-import sentry_sdk
 from dotenv import load_dotenv
 from telegram.error import NetworkError
+
+from sbahelper.errors import DEFAULT_TRANSIENT_ERROR_TEXT, SentryTracker, is_transient_error
+from sbahelper.logging import configure_logging as configure_shared_logging
+from sbahelper.startup import print_results as print_startup_results
 
 
 load_dotenv()
@@ -105,93 +108,36 @@ def extract_supported_url(text: str) -> str | None:
 # Error tracking
 # --------------------------------------------------------------------------- #
 
-_sentry_initialized = False
-_TRANSIENT_ERROR_TEXT = (
-    "all connection attempts failed",
-    "cannot connect to host",
-    "connection has been closed",
-    "connection reset",
-    "http client says",
-    "readtimeout",
-    "server disconnected",
-    "temporarily unavailable",
-    "timed out",
-    "timeout",
-)
+_TRANSIENT_ERROR_TEXT = DEFAULT_TRANSIENT_ERROR_TEXT + ("http client says",)
 
 
 def is_transient_network_error(error: BaseException) -> bool:
-    current: BaseException | None = error
-    seen: set[int] = set()
-    while current is not None and id(current) not in seen:
-        seen.add(id(current))
-
-        if isinstance(current, NetworkError):
-            return True
-
-        text = str(current).lower()
-        if any(marker in text for marker in _TRANSIENT_ERROR_TEXT):
-            return True
-
-        current = current.__cause__ or current.__context__
-
-    return False
+    return is_transient_error(
+        error,
+        exception_types=(NetworkError,),
+        text_markers=_TRANSIENT_ERROR_TEXT,
+    )
 
 
-def _sentry_before_send(event: dict, hint: dict) -> dict | None:
-    exc_info = hint.get("exc_info")
-    if exc_info and len(exc_info) >= 2 and isinstance(exc_info[1], BaseException):
-        if is_transient_network_error(exc_info[1]):
-            return None
-
-    logentry = event.get("logentry")
-    logentry_message = logentry.get("message") if isinstance(logentry, dict) else logentry
-    message = " ".join(
-        str(part)
-        for part in (
-            event.get("message"),
-            logentry_message,
-        )
-        if part
-    ).lower()
-    if message and any(marker in message for marker in _TRANSIENT_ERROR_TEXT):
-        return None
-
-    return event
+_sentry_tracker = SentryTracker(
+    dsn_getter=lambda: SENTRY_DSN,
+    environment_getter=lambda: SENTRY_ENVIRONMENT,
+    release_getter=lambda: SENTRY_RELEASE,
+    is_transient=is_transient_network_error,
+    text_markers=_TRANSIENT_ERROR_TEXT,
+)
 
 
 def init_error_tracking(service_name: str) -> bool:
-    global _sentry_initialized
-
-    if _sentry_initialized:
-        sentry_sdk.set_tag("service", service_name)
-        return True
-
-    if not SENTRY_DSN:
-        logger.debug("Sentry is not configured.")
-        return False
-
-    sentry_sdk.init(
-        dsn=SENTRY_DSN,
-        environment=SENTRY_ENVIRONMENT or None,
-        release=SENTRY_RELEASE or None,
-        traces_sample_rate=0.0,
-        before_send=_sentry_before_send,
-    )
-    sentry_sdk.set_tag("service", service_name)
-    _sentry_initialized = True
-    logger.info("Sentry error tracking enabled for %s.", service_name)
-    return True
+    return _sentry_tracker.init(service_name)
 
 
 def capture_exception(error: BaseException) -> None:
-    if _sentry_initialized and not is_transient_network_error(error):
-        sentry_sdk.capture_exception(error)
+    _sentry_tracker.capture_exception(error)
 
 
 def flush_error_tracking(timeout: float = 2.0) -> None:
-    if _sentry_initialized:
-        sentry_sdk.flush(timeout=timeout)
+    _sentry_tracker.flush(timeout=timeout)
 
 
 # --------------------------------------------------------------------------- #
@@ -274,9 +220,7 @@ def is_nonblocking_check_error(check: LinkCheck, error: BaseException) -> bool:
 
 
 def print_results(results: list[LinkCheckResult]) -> None:
-    for result in results:
-        status = "OK" if result.ok else "FAIL" if result.blocks_startup else "WARN"
-        print(f"{status} {result.service}: {result.message}")
+    print_startup_results(results)
 
 
 def result_exit_code(results: list[LinkCheckResult]) -> int:
@@ -292,9 +236,9 @@ def result_exit_code(results: list[LinkCheckResult]) -> int:
 # --------------------------------------------------------------------------- #
 
 def configure_logging() -> None:
-    logging.basicConfig(
-        level=logging.INFO,
-        format="%(asctime)s %(levelname)s [%(name)s] %(message)s",
+    configure_shared_logging(
+        "INFO",
+        quiet_loggers=("yt_dlp", "httpx", "httpcore"),
     )
 
 

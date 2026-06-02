@@ -9,6 +9,7 @@ from telegram import BotCommand
 from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, filters
 from telegram.request import HTTPXRequest
 
+from sbahelper.logging import configure_logging
 from downloader.service import (
     ALLOWED_CHAT_IDS,
     DOWNLOADER_BOT_TOKEN,
@@ -23,14 +24,7 @@ from downloader.handlers import handle_message
 
 def _configure_logging() -> None:
     level_name = os.getenv("LOG_LEVEL", "INFO").upper()
-    level = getattr(logging, level_name, logging.INFO)
-    logging.basicConfig(
-        level=level,
-        format="%(asctime)s %(levelname)s [%(name)s] %(message)s",
-    )
-    logging.getLogger("yt_dlp").setLevel(logging.WARNING)
-    logging.getLogger("httpx").setLevel(logging.WARNING)
-    logging.getLogger("httpcore").setLevel(logging.WARNING)
+    configure_logging(level_name, quiet_loggers=("yt_dlp", "httpx", "httpcore"))
 
 
 async def _cmd_start(update, context) -> None:
