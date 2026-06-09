@@ -141,16 +141,13 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
     logger.info("[%s] %s requested URL: %s", chat_label, user_label, url)
 
-    # --- 1. Проверяем ссылку ---
+    # --- 1. Проверяем ссылку: это короткое вертикальное видео (shorts)? ---
     status_msg = await message.reply_text(
         f"{INFO_EMOJI} Проверяю ссылку\\.\\.\\.",
         parse_mode="MarkdownV2",
     )
 
     loop = asyncio.get_running_loop()
-
-    # --- 2. Получаем информацию о видео ---
-    await _safe_edit(status_msg, f"{INFO_EMOJI} Получаю информацию о видео\\.\\.\\.")
 
     try:
         info = await loop.run_in_executor(
@@ -175,6 +172,9 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         logger.exception("Unexpected error in fetch_info")
         await _safe_edit(status_msg, "❌ Неизвестная ошибка при получении информации\\.")
         return
+
+    # --- 2. Ссылка прошла проверку — получаем информацию о видео ---
+    await _safe_edit(status_msg, f"{INFO_EMOJI} Получаю информацию о видео\\.\\.\\.")
 
     duration_str = f" · {format_duration(info.duration)}" if info.duration else ""
     await _safe_edit(
