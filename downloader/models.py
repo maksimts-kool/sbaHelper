@@ -11,6 +11,8 @@ class VideoInfo:
     thumbnail: str | None
     view_count: int | None
     like_count: int | None
+    width: int | None = None
+    height: int | None = None
 
 
 @dataclass

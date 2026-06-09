@@ -32,9 +32,8 @@ DOWNLOADER_BOT_TOKEN = os.getenv("DOWNLOADER_BOT_TOKEN", "")
 MAX_FILE_SIZE_MB = int(os.getenv("MAX_FILE_SIZE_MB", "50"))
 MAX_DURATION_SEC = int(os.getenv("MAX_DURATION_SEC", "600"))
 # Максимальная длительность «короткого» видео (shorts/reels). Видео длиннее
-# отклоняется на этапе проверки ссылки. По умолчанию 3 минуты — максимум для
-# YouTube Shorts.
-MAX_SHORT_DURATION_SEC = int(os.getenv("MAX_SHORT_DURATION_SEC", "180"))
+# отклоняется на этапе проверки ссылки. По умолчанию 5 минут.
+MAX_SHORT_DURATION_SEC = int(os.getenv("MAX_SHORT_DURATION_SEC", "300"))
 DOWNLOAD_DIR = os.getenv("DOWNLOAD_DIR", "/tmp/downloader_videos")
 
 COOKIES_FILE = os.getenv("COOKIES_FILE", "")
@@ -93,6 +92,18 @@ def exceeds_short_limit(duration: int) -> bool:
     Длительность 0 (неизвестна) считается допустимой и не отклоняется здесь.
     """
     return duration > MAX_SHORT_DURATION_SEC
+
+
+def is_vertical_video(width: int | None, height: int | None) -> bool:
+    """True, если видео вертикальное (портрет) — признак shorts/reels.
+
+    Бот принимает только вертикальные короткие видео, а обычные (горизонтальные)
+    ролики отклоняет. Если размеры неизвестны, видео считается подходящим и не
+    отклоняется здесь.
+    """
+    if not width or not height:
+        return True
+    return height > width
 
 
 # --------------------------------------------------------------------------- #

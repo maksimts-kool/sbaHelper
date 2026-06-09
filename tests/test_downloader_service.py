@@ -44,12 +44,14 @@ def _install_runtime_stubs() -> None:
 _install_runtime_stubs()
 
 from downloader.core import DownloadError, UnsupportedContentError, _file_has_audio_stream
+from downloader.metadata import pick_video_dimensions
 from downloader.service import (
     MAX_SHORT_DURATION_SEC,
     LinkCheck,
     LinkCheckResult,
     exceeds_short_limit,
     extract_supported_url,
+    is_vertical_video,
     print_results,
     result_exit_code,
     run_check,
@@ -169,6 +171,27 @@ class ShortVideoLimitTest(unittest.TestCase):
 
     def test_long_video_is_rejected(self) -> None:
         self.assertTrue(exceeds_short_limit(MAX_SHORT_DURATION_SEC + 1))
+
+
+class VerticalVideoCheckTest(unittest.TestCase):
+    def test_vertical_video_is_accepted(self) -> None:
+        self.assertTrue(is_vertical_video(1080, 1920))
+
+    def test_horizontal_and_square_videos_are_rejected(self) -> None:
+        self.assertFalse(is_vertical_video(1920, 1080))
+        self.assertFalse(is_vertical_video(1080, 1080))
+
+    def test_unknown_dimensions_are_allowed(self) -> None:
+        self.assertTrue(is_vertical_video(None, None))
+        self.assertTrue(is_vertical_video(0, 0))
+
+    def test_dimensions_fall_back_to_formats(self) -> None:
+        meta = {"formats": [{"width": 720, "height": 1280}]}
+        self.assertEqual(pick_video_dimensions(meta), (720, 1280))
+
+    def test_top_level_dimensions_take_priority(self) -> None:
+        meta = {"width": 1080, "height": 1920, "formats": [{"width": 1, "height": 1}]}
+        self.assertEqual(pick_video_dimensions(meta), (1080, 1920))
 
 
 if __name__ == "__main__":

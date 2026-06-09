@@ -39,6 +39,26 @@ def looks_like_generated_tiktok_title(title: str | None) -> bool:
     return bool(re.fullmatch(r"TikTok video #\d+", title.strip(), re.IGNORECASE))
 
 
+def pick_video_dimensions(meta: dict) -> tuple[int | None, int | None]:
+    """Возвращает (ширина, высота) видео для определения ориентации.
+
+    Сначала берём размеры верхнего уровня, иначе — из первого видео-формата
+    (у всех форматов одного видео одинаковая ориентация).
+    """
+    width = pick_first_int(meta, "width")
+    height = pick_first_int(meta, "height")
+    if width and height:
+        return width, height
+
+    for fmt in meta.get("formats") or []:
+        fmt_width = fmt.get("width")
+        fmt_height = fmt.get("height")
+        if fmt_width and fmt_height:
+            return int(fmt_width), int(fmt_height)
+
+    return width, height
+
+
 def pick_first_int(meta: dict, *keys: str) -> int | None:
     for key in keys:
         value = meta.get(key)
@@ -102,6 +122,8 @@ def normalize_video_info(url: str, meta: dict, duration: int) -> VideoInfo:
         if better_uploader:
             uploader = better_uploader
 
+    width, height = pick_video_dimensions(meta)
+
     return VideoInfo(
         title=title,
         uploader=uploader,
@@ -109,4 +131,6 @@ def normalize_video_info(url: str, meta: dict, duration: int) -> VideoInfo:
         thumbnail=meta.get("thumbnail"),
         view_count=view_count,
         like_count=like_count,
+        width=width,
+        height=height,
     )

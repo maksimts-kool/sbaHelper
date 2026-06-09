@@ -36,9 +36,9 @@ async def _cmd_start(update, context) -> None:
         "- <code>https://youtube.com/shorts/...</code>\n"
         "- <code>https://www.facebook.com/reel/...</code>\n"
         "- <code>https://fb.watch/...</code>\n\n"
-        "Я проверю ссылку и скачаю видео, если это короткий ролик "
-        f"(до {MAX_SHORT_DURATION_SEC // 60} мин). Длинные видео, фото- и обычные "
-        "посты не поддерживаются.\n\n"
+        "Я проверю ссылку и скачаю видео, если это короткий вертикальный ролик "
+        f"(до {MAX_SHORT_DURATION_SEC // 60} мин). Горизонтальные и длинные видео, "
+        "фото- и обычные посты не поддерживаются.\n\n"
         f"Размер файла - до {MAX_FILE_SIZE_MB} МБ.",
         parse_mode="HTML",
     )
