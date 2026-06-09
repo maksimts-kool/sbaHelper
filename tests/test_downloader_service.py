@@ -43,7 +43,13 @@ def _install_runtime_stubs() -> None:
 
 _install_runtime_stubs()
 
-from downloader.core import DownloadError, UnsupportedContentError, _file_has_audio_stream
+from downloader.core import (
+    DownloadError,
+    UnsupportedContentError,
+    VideoTooLongError,
+    _file_has_audio_stream,
+    fetch_info,
+)
 from downloader.metadata import pick_video_dimensions
 from downloader.service import (
     MAX_SHORT_DURATION_SEC,
@@ -192,6 +198,45 @@ class VerticalVideoCheckTest(unittest.TestCase):
     def test_top_level_dimensions_take_priority(self) -> None:
         meta = {"width": 1080, "height": 1920, "formats": [{"width": 1, "height": 1}]}
         self.assertEqual(pick_video_dimensions(meta), (1080, 1920))
+
+
+class FetchInfoVerificationTest(unittest.TestCase):
+    """fetch_info должен принимать только короткие вертикальные видео."""
+
+    @staticmethod
+    def _meta(**overrides) -> dict:
+        meta = {
+            "title": "Clip",
+            "uploader": "Author",
+            "duration": 30,
+            "width": 720,
+            "height": 1280,
+            "formats": [{"vcodec": "h264", "width": 720, "height": 1280}],
+        }
+        meta.update(overrides)
+        return meta
+
+    def test_horizontal_video_is_rejected_before_duration_check(self) -> None:
+        # Длинное горизонтальное видео должно отклоняться как «не вертикальное»,
+        # а не как «слишком длинное».
+        meta = self._meta(duration=1128, width=1920, height=1080)
+        with patch("downloader.core._extract_with_retries", return_value=meta):
+            with self.assertRaises(UnsupportedContentError):
+                fetch_info("https://youtu.be/abc123")
+
+    def test_long_vertical_video_is_rejected_as_too_long(self) -> None:
+        meta = self._meta(duration=1128, width=720, height=1280)
+        with patch("downloader.core._extract_with_retries", return_value=meta):
+            with self.assertRaises(VideoTooLongError):
+                fetch_info("https://youtu.be/abc123")
+
+    def test_short_vertical_video_is_accepted(self) -> None:
+        meta = self._meta(duration=30, width=720, height=1280)
+        with patch("downloader.core._extract_with_retries", return_value=meta):
+            info = fetch_info("https://youtu.be/abc123")
+
+        self.assertEqual(info.width, 720)
+        self.assertEqual(info.height, 1280)
 
 
 if __name__ == "__main__":

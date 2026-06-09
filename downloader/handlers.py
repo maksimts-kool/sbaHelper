@@ -30,14 +30,7 @@ from downloader.formatting import (
     format_duration,
 )
 from downloader.progress import ProgressStage, rounded_progress_percent
-from downloader.service import (
-    ALLOWED_CHAT_IDS,
-    MAX_SHORT_DURATION_SEC,
-    capture_exception,
-    exceeds_short_limit,
-    extract_supported_url,
-    is_vertical_video,
-)
+from downloader.service import ALLOWED_CHAT_IDS, capture_exception, extract_supported_url
 
 logger = logging.getLogger(__name__)
 
@@ -178,30 +171,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         capture_exception(e)
         logger.exception("Unexpected error in fetch_info")
         await _safe_edit(status_msg, "❌ Неизвестная ошибка при получении информации\\.")
-        return
-
-    # Принимаем только короткие вертикальные видео (shorts/reels).
-    if not is_vertical_video(info.width, info.height):
-        logger.info(
-            "[%s] Rejected non-vertical video (%sx%s): %s",
-            chat_label, info.width, info.height, url,
-        )
-        rejection = (
-            "Это не вертикальное видео (shorts/reels). "
-            "Я скачиваю только короткие вертикальные видео."
-        )
-        _reject_with_transient_error(context, status_msg, f"🚫 {escape_md_v2(rejection)}")
-        return
-
-    if exceeds_short_limit(info.duration):
-        logger.info(
-            "[%s] Rejected non-short video (%ds): %s", chat_label, info.duration, url
-        )
-        rejection = (
-            f"Это не короткое видео ({format_duration(info.duration)}). "
-            f"Я скачиваю только короткие видео до {MAX_SHORT_DURATION_SEC // 60} мин."
-        )
-        _reject_with_transient_error(context, status_msg, f"🚫 {escape_md_v2(rejection)}")
         return
 
     duration_str = f" · {format_duration(info.duration)}" if info.duration else ""

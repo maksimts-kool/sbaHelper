@@ -12,13 +12,16 @@ from typing import Callable
 
 import yt_dlp
 
-from downloader.metadata import normalize_video_info
+from downloader.metadata import normalize_video_info, pick_video_dimensions
 from downloader.models import DownloadResult, VideoInfo
 from downloader.platforms import is_facebook_url, is_tiktok_url
 from downloader.service import (
     DOWNLOAD_DIR,
     MAX_DURATION_SEC,
     MAX_FILE_SIZE_MB,
+    MAX_SHORT_DURATION_SEC,
+    exceeds_short_limit,
+    is_vertical_video,
 )
 from downloader.ytdlp_options import (
     YTDLP_RETRY_ATTEMPTS,
@@ -191,10 +194,21 @@ def fetch_info(url: str) -> VideoInfo:
         raise UnsupportedContentError("Фото-посты не поддерживаются. Только обычные видео.")
 
     duration = int(meta.get("duration") or 0)
-    if duration > MAX_DURATION_SEC:
+
+    # Принимаем только вертикальные короткие видео (shorts/reels). Ориентацию
+    # проверяем раньше длительности, чтобы обычное горизонтальное видео получало
+    # понятную причину отказа, а не «слишком длинное».
+    width, height = pick_video_dimensions(meta)
+    if not is_vertical_video(width, height):
+        raise UnsupportedContentError(
+            "Это не вертикальное видео (shorts/reels). "
+            "Я скачиваю только короткие вертикальные видео."
+        )
+
+    if exceeds_short_limit(duration):
         raise VideoTooLongError(
             f"Видео слишком длинное ({duration // 60}:{duration % 60:02d}). "
-            f"Максимум — {MAX_DURATION_SEC // 60} мин."
+            f"Максимум — {MAX_SHORT_DURATION_SEC // 60} мин."
         )
 
     return normalize_video_info(url, meta, duration)
