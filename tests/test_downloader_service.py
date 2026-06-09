@@ -44,7 +44,16 @@ def _install_runtime_stubs() -> None:
 _install_runtime_stubs()
 
 from downloader.core import DownloadError, UnsupportedContentError, _file_has_audio_stream
-from downloader.service import LinkCheck, LinkCheckResult, print_results, result_exit_code, run_check
+from downloader.service import (
+    MAX_SHORT_DURATION_SEC,
+    LinkCheck,
+    LinkCheckResult,
+    exceeds_short_limit,
+    extract_supported_url,
+    print_results,
+    result_exit_code,
+    run_check,
+)
 from downloader.ytdlp_options import get_format_selector
 
 
@@ -123,6 +132,43 @@ class DownloaderStartupChecksTest(unittest.TestCase):
             return_value=types.SimpleNamespace(stdout='{"streams":[{"codec_type":"video"}]}'),
         ):
             self.assertFalse(_file_has_audio_stream("/tmp/video.mp4"))
+
+
+class SupportedUrlDetectionTest(unittest.TestCase):
+    def test_accepts_any_main_domain_link(self) -> None:
+        urls = [
+            "https://www.youtube.com/watch?v=abcdEFGhij",
+            "https://youtube.com/shorts/abcdEFGhij",
+            "https://m.youtube.com/watch?v=abcdEFGhij",
+            "https://youtu.be/abcdEFGhij",
+            "https://www.tiktok.com/@user/video/123",
+            "https://vm.tiktok.com/ZSabc123/",
+            "https://www.facebook.com/reel/123",
+            "https://web.facebook.com/some.user/posts/123",
+            "https://fb.watch/abc123/",
+        ]
+        for url in urls:
+            with self.subTest(url=url):
+                self.assertEqual(extract_supported_url(url), url)
+
+    def test_extracts_link_from_surrounding_text(self) -> None:
+        text = "смотри это https://www.tiktok.com/@user/video/123 круто!"
+        self.assertEqual(
+            extract_supported_url(text), "https://www.tiktok.com/@user/video/123"
+        )
+
+    def test_ignores_unrelated_domain(self) -> None:
+        self.assertIsNone(extract_supported_url("https://example.com/video/123"))
+
+
+class ShortVideoLimitTest(unittest.TestCase):
+    def test_short_or_unknown_duration_is_allowed(self) -> None:
+        self.assertFalse(exceeds_short_limit(0))
+        self.assertFalse(exceeds_short_limit(60))
+        self.assertFalse(exceeds_short_limit(MAX_SHORT_DURATION_SEC))
+
+    def test_long_video_is_rejected(self) -> None:
+        self.assertTrue(exceeds_short_limit(MAX_SHORT_DURATION_SEC + 1))
 
 
 if __name__ == "__main__":

@@ -13,8 +13,8 @@ from sbahelper.logging import configure_logging
 from downloader.service import (
     ALLOWED_CHAT_IDS,
     DOWNLOADER_BOT_TOKEN,
-    MAX_DURATION_SEC,
     MAX_FILE_SIZE_MB,
+    MAX_SHORT_DURATION_SEC,
     capture_exception,
     init_error_tracking,
     is_transient_network_error,
@@ -29,17 +29,17 @@ def _configure_logging() -> None:
 
 async def _cmd_start(update, context) -> None:
     await update.message.reply_text(
-        "Привет! Я скачиваю видео из <b>TikTok</b>, <b>YouTube Shorts</b> и <b>Facebook</b>.\n\n"
-        "Просто отправь мне ссылку:\n"
-        "- <code>https://vm.tiktok.com/...</code>\n"
+        "Привет! Я скачиваю <b>короткие</b> видео из <b>TikTok</b>, "
+        "<b>YouTube Shorts</b> и <b>Facebook</b>.\n\n"
+        "Просто отправь мне ссылку на видео с любого из этих сайтов:\n"
         "- <code>https://www.tiktok.com/...</code>\n"
         "- <code>https://youtube.com/shorts/...</code>\n"
-        "- <code>https://www.facebook.com/watch/?v=...</code>\n"
         "- <code>https://www.facebook.com/reel/...</code>\n"
-        "- <code>https://www.facebook.com/.../videos/...</code>\n"
         "- <code>https://fb.watch/...</code>\n\n"
-        f"Максимальная длительность - {MAX_DURATION_SEC // 60} мин, "
-        f"размер файла - до {MAX_FILE_SIZE_MB} МБ.",
+        "Я проверю ссылку и скачаю видео, если это короткий ролик "
+        f"(до {MAX_SHORT_DURATION_SEC // 60} мин). Длинные видео, фото- и обычные "
+        "посты не поддерживаются.\n\n"
+        f"Размер файла - до {MAX_FILE_SIZE_MB} МБ.",
         parse_mode="HTML",
     )
 

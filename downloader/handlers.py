@@ -30,9 +30,18 @@ from downloader.formatting import (
     format_duration,
 )
 from downloader.progress import ProgressStage, rounded_progress_percent
-from downloader.service import ALLOWED_CHAT_IDS, capture_exception, extract_supported_url
+from downloader.service import (
+    ALLOWED_CHAT_IDS,
+    MAX_SHORT_DURATION_SEC,
+    capture_exception,
+    exceeds_short_limit,
+    extract_supported_url,
+)
 
 logger = logging.getLogger(__name__)
+
+# Через сколько секунд удалять сообщение с ошибкой проверки ссылки.
+REJECTION_DELETE_DELAY_SEC = 5.0
 
 
 async def _safe_edit(msg: Message, text: str) -> None:
@@ -78,6 +87,34 @@ async def _safe_delete_message(
     return False
 
 
+async def _show_then_delete(
+    status_msg: Message,
+    text: str,
+    *,
+    bot,
+    delay: float = REJECTION_DELETE_DELAY_SEC,
+) -> None:
+    """Показывает текст ошибки и удаляет сообщение через `delay` секунд."""
+    await _safe_edit(status_msg, text)
+    await asyncio.sleep(delay)
+    await _safe_delete_message(status_msg, bot=bot)
+
+
+def _reject_with_transient_error(
+    context: ContextTypes.DEFAULT_TYPE,
+    status_msg: Message,
+    text: str,
+) -> None:
+    """Ссылка не прошла проверку: показываем ошибку и удаляем её через 5 секунд.
+
+    Удаление выполняется фоновой задачей, чтобы не блокировать обработку
+    других сообщений на время паузы.
+    """
+    context.application.create_task(
+        _show_then_delete(status_msg, text, bot=context.bot)
+    )
+
+
 # --------------------------------------------------------------------------- #
 #  Основной обработчик                                                         #
 # --------------------------------------------------------------------------- #
@@ -110,9 +147,9 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
     logger.info("[%s] %s requested URL: %s", chat_label, user_label, url)
 
-    # --- 1. Получаем информацию ---
+    # --- 1. Проверяем ссылку ---
     status_msg = await message.reply_text(
-        f"{INFO_EMOJI} Получаю информацию о видео\\.\\.\\.",
+        f"{INFO_EMOJI} Проверяю ссылку\\.\\.\\.",
         parse_mode="MarkdownV2",
     )
 
@@ -123,10 +160,11 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             None, fetch_info, url
         )
     except UnsupportedContentError as e:
-        await _safe_edit(status_msg, f"🚫 {escape_md_v2(str(e))}")
+        # Фото-пост, трансляция и т.п. — не короткое видео.
+        _reject_with_transient_error(context, status_msg, f"🚫 {escape_md_v2(str(e))}")
         return
     except VideoTooLongError as e:
-        await _safe_edit(status_msg, f"⏱ {escape_md_v2(str(e))}")
+        _reject_with_transient_error(context, status_msg, f"⏱ {escape_md_v2(str(e))}")
         return
     except DownloadError as e:
         short_err = str(e)[:200]
@@ -139,6 +177,18 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         capture_exception(e)
         logger.exception("Unexpected error in fetch_info")
         await _safe_edit(status_msg, "❌ Неизвестная ошибка при получении информации\\.")
+        return
+
+    # Принимаем только короткие видео (shorts/reels), а не длинные ролики.
+    if exceeds_short_limit(info.duration):
+        logger.info(
+            "[%s] Rejected non-short video (%ds): %s", chat_label, info.duration, url
+        )
+        rejection = (
+            f"Это не короткое видео ({format_duration(info.duration)}). "
+            f"Я скачиваю только shorts / короткие видео до {MAX_SHORT_DURATION_SEC // 60} мин."
+        )
+        _reject_with_transient_error(context, status_msg, f"🚫 {escape_md_v2(rejection)}")
         return
 
     duration_str = f" · {format_duration(info.duration)}" if info.duration else ""
