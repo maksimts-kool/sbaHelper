@@ -180,18 +180,18 @@ def fetch_info(url: str) -> VideoInfo:
     except yt_dlp.utils.DownloadError as e:
         err_msg = _rewrite_download_error(url, str(e))
         if "unsupported url" in err_msg.lower() and ("/photo/" in url.lower() or "/photo/" in err_msg.lower()):
-            raise UnsupportedContentError("Фото-посты не поддерживаются. Только обычные видео.") from e
+            raise UnsupportedContentError("Здесь только фото, без видео — скачивать нечего.") from e
         raise DownloadError(err_msg) from e
 
     # Отклоняем прямые трансляции (включая архивные)
     _live_status = meta.get("live_status") or ""
     if meta.get("is_live") or _live_status in ("is_live", "is_upcoming", "was_live", "post_live"):
-        raise UnsupportedContentError("Прямые трансляции не поддерживаются. Только обычные видео.")
+        raise UnsupportedContentError("Это прямая трансляция — её скачать не получится, только обычные видео.")
 
     # Отклоняем фото-посты (нет видео-дорожки ни в одном формате)
     _formats = meta.get("formats") or []
     if _formats and not any(f.get("vcodec", "none") not in ("none", None) for f in _formats):
-        raise UnsupportedContentError("Фото-посты не поддерживаются. Только обычные видео.")
+        raise UnsupportedContentError("Здесь только фото, без видео — скачивать нечего.")
 
     duration = int(meta.get("duration") or 0)
 
@@ -201,14 +201,14 @@ def fetch_info(url: str) -> VideoInfo:
     width, height = pick_video_dimensions(meta)
     if not is_vertical_video(width, height):
         raise UnsupportedContentError(
-            "Это не вертикальное видео (shorts/reels). "
-            "Я скачиваю только короткие вертикальные видео."
+            "Я умею скачивать только короткие вертикальные видео (shorts / reels), "
+            "это видео не подойдёт."
         )
 
     if exceeds_short_limit(duration):
         raise VideoTooLongError(
-            f"Видео слишком длинное ({duration // 60}:{duration % 60:02d}). "
-            f"Максимум — {MAX_SHORT_DURATION_SEC // 60} мин."
+            f"Я умею скачивать только короткие видео — до {MAX_SHORT_DURATION_SEC // 60} мин, "
+            f"а это длиннее ({duration // 60}:{duration % 60:02d})."
         )
 
     return normalize_video_info(url, meta, duration)
@@ -257,8 +257,8 @@ def download_video(
     duration = int(meta.get("duration") or 0)
     if duration > MAX_DURATION_SEC:
         raise VideoTooLongError(
-            f"Видео слишком длинное ({duration // 60}:{duration % 60:02d}). "
-            f"Максимум — {MAX_DURATION_SEC // 60} мин."
+            f"Я умею скачивать только короткие видео — до {MAX_DURATION_SEC // 60} мин, "
+            f"а это длиннее ({duration // 60}:{duration % 60:02d})."
         )
 
     # Ищем скачанный файл по шаблону

@@ -149,13 +149,16 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
     loop = asyncio.get_running_loop()
 
+    # --- 2. Получаем информацию о видео ---
+    await _safe_edit(status_msg, f"{INFO_EMOJI} Получаю информацию о видео\\.\\.\\.")
+
     try:
         info = await loop.run_in_executor(
             None, fetch_info, url
         )
     except UnsupportedContentError as e:
-        # Фото-пост, трансляция и т.п. — не короткое видео.
-        _reject_with_transient_error(context, status_msg, f"🚫 {escape_md_v2(str(e))}")
+        # Фото-пост, трансляция, горизонтальное видео и т.п. — мягко поясняем.
+        _reject_with_transient_error(context, status_msg, f"{INFO_EMOJI} {escape_md_v2(str(e))}")
         return
     except VideoTooLongError as e:
         _reject_with_transient_error(context, status_msg, f"⏱ {escape_md_v2(str(e))}")
@@ -185,7 +188,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     )
     await context.bot.send_chat_action(chat_id=chat_id, action=ChatAction.UPLOAD_VIDEO)
 
-    # --- 2. Скачиваем ---
+    # --- 3. Скачиваем ---
     result: DownloadResult | None = None
     last_reported_pct = 0
     progress_stage = ProgressStage()
@@ -256,7 +259,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         ),
     )
 
-    # --- 3. Отправляем ---
+    # --- 4. Отправляем ---
     logger.info("[%s] Sending video to chat...", chat_label)
     progress_stage.advance("sending")
     await _safe_edit(
