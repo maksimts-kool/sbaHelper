@@ -84,6 +84,35 @@ def extract_supported_url(text: str) -> str | None:
     return None
 
 
+# URL-формы, которые НЕ являются отдельным видео: профили, каналы, подборки,
+# разделы. Их игнорируем, чтобы случайно не начать скачивать чужой профиль.
+_NON_VIDEO_URL_PATTERNS: list[re.Pattern[str]] = [
+    # TikTok: профиль (@user без /video/ или /photo/) и разделы-подборки.
+    re.compile(r"https?://(?:[\w-]+\.)?tiktok\.com/@[^/?#\s]+/?(?:[?#]|$)", re.IGNORECASE),
+    re.compile(
+        r"https?://(?:[\w-]+\.)?tiktok\.com/(?:tag|music|discover|foryou|following|live|search|explore)\b",
+        re.IGNORECASE,
+    ),
+    # YouTube: каналы, плейлисты, ленты, поиск, лента shorts (без id).
+    re.compile(
+        r"https?://(?:[\w-]+\.)?youtube\.com/"
+        r"(?:@[^/?#\s]+|channel/|c/|user/|playlist\b|feed/|results\b|hashtag/|shorts/?(?:[?#]|$))",
+        re.IGNORECASE,
+    ),
+    # Facebook: профили, группы, разделы.
+    re.compile(
+        r"https?://(?:[\w-]+\.)?facebook\.com/"
+        r"(?:profile\.php|people/|groups/|marketplace/|events/|gaming(?:/|\b)|pages/)",
+        re.IGNORECASE,
+    ),
+]
+
+
+def is_non_video_url(url: str) -> bool:
+    """True для ссылок на профиль/канал/подборку (а не на отдельное видео)."""
+    return any(pattern.search(url) for pattern in _NON_VIDEO_URL_PATTERNS)
+
+
 def exceeds_short_limit(duration: int) -> bool:
     """True, если видео длиннее допустимой длины «короткого» ролика.
 

@@ -57,6 +57,7 @@ from downloader.service import (
     LinkCheckResult,
     exceeds_short_limit,
     extract_supported_url,
+    is_non_video_url,
     is_vertical_video,
     print_results,
     result_exit_code,
@@ -169,6 +170,39 @@ class SupportedUrlDetectionTest(unittest.TestCase):
         self.assertIsNone(extract_supported_url("https://example.com/video/123"))
 
 
+class NonVideoUrlTest(unittest.TestCase):
+    def test_profiles_channels_and_listings_are_flagged(self) -> None:
+        non_video = [
+            "https://www.tiktok.com/@ivanova197",
+            "https://www.tiktok.com/@ivanova197/",
+            "https://www.tiktok.com/tag/cats",
+            "https://m.tiktok.com/@user",
+            "https://www.youtube.com/@MrBeast",
+            "https://www.youtube.com/channel/UCabc123",
+            "https://www.youtube.com/playlist?list=PL123",
+            "https://www.youtube.com/shorts",
+            "https://www.facebook.com/profile.php?id=123",
+            "https://www.facebook.com/groups/somegroup",
+        ]
+        for url in non_video:
+            with self.subTest(url=url):
+                self.assertTrue(is_non_video_url(url))
+
+    def test_actual_video_urls_are_not_flagged(self) -> None:
+        videos = [
+            "https://www.tiktok.com/@ivanova197/video/7234567890",
+            "https://vm.tiktok.com/ZSabc123/",
+            "https://youtube.com/shorts/abcdEFGhij",
+            "https://www.youtube.com/watch?v=abcdEFGhij",
+            "https://youtu.be/abcdEFGhij",
+            "https://www.facebook.com/reel/123",
+            "https://www.facebook.com/user/videos/123",
+        ]
+        for url in videos:
+            with self.subTest(url=url):
+                self.assertFalse(is_non_video_url(url))
+
+
 class ShortVideoLimitTest(unittest.TestCase):
     def test_short_or_unknown_duration_is_allowed(self) -> None:
         self.assertFalse(exceeds_short_limit(0))
@@ -237,6 +271,12 @@ class FetchInfoVerificationTest(unittest.TestCase):
 
         self.assertEqual(info.width, 720)
         self.assertEqual(info.height, 1280)
+
+    def test_playlist_or_profile_is_rejected(self) -> None:
+        meta = {"_type": "playlist", "entries": [{"id": "a"}, {"id": "b"}]}
+        with patch("downloader.core._extract_with_retries", return_value=meta):
+            with self.assertRaises(UnsupportedContentError):
+                fetch_info("https://www.tiktok.com/@ivanova197/video/123")
 
 
 if __name__ == "__main__":

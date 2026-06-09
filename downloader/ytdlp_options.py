@@ -71,6 +71,9 @@ def build_ydl_opts(
     else:
         ydl_opts["skip_download"] = True
         ydl_opts["format"] = get_metadata_format_selector(url)
+        # Не разворачиваем канал/плейлист целиком (иначе профиль перечисляется
+        # десятками секунд). Отдельное видео извлекается полностью как обычно.
+        ydl_opts["extract_flat"] = "in_playlist"
 
     apply_auth_options(ydl_opts, url)
     return ydl_opts

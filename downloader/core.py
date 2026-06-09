@@ -183,6 +183,12 @@ def fetch_info(url: str) -> VideoInfo:
             raise UnsupportedContentError("Здесь только фото, без видео — скачивать нечего.") from e
         raise DownloadError(err_msg) from e
 
+    # Профиль / канал / подборка — это не отдельное видео.
+    if meta.get("_type") == "playlist" or meta.get("entries") is not None:
+        raise UnsupportedContentError(
+            "Это ссылка на профиль или подборку, а не на отдельное видео."
+        )
+
     # Отклоняем прямые трансляции (включая архивные)
     _live_status = meta.get("live_status") or ""
     if meta.get("is_live") or _live_status in ("is_live", "is_upcoming", "was_live", "post_live"):

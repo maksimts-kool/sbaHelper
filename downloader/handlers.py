@@ -30,7 +30,12 @@ from downloader.formatting import (
     format_duration,
 )
 from downloader.progress import ProgressStage, rounded_progress_percent
-from downloader.service import ALLOWED_CHAT_IDS, capture_exception, extract_supported_url
+from downloader.service import (
+    ALLOWED_CHAT_IDS,
+    capture_exception,
+    extract_supported_url,
+    is_non_video_url,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -137,6 +142,12 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     url = extract_supported_url(text)
     if not url:
         logger.debug("No supported URL in message from %s in %s", user_label, chat_label)
+        return
+
+    # Профиль / канал / подборка — это не отдельное видео, молча игнорируем,
+    # чтобы не пытаться скачать чужой профиль целиком.
+    if is_non_video_url(url):
+        logger.info("[%s] Ignoring non-video URL (profile/listing): %s", chat_label, url)
         return
 
     logger.info("[%s] %s requested URL: %s", chat_label, user_label, url)
