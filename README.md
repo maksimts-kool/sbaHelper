@@ -32,13 +32,16 @@ This repo runs two Telegram bots from one Docker Compose project:
 └── .env.example
 ```
 
-The packages use PEP 420 namespace packages (no `__init__.py`); run them with
-`python -m downloader.bot` and `python -m umap.bot`.
+Run the packages with `python -m downloader.bot` and `python -m umap.bot`.
 
 ## Setup
 
-Create `.env` from `.env.example`. The example surfaces the values a deployment
-usually tunes:
+For local Docker Compose, create `.env` from `.env.example`. For Portainer or
+other stack deployers, set the same keys as stack environment variables instead
+of relying on a physical `.env` file. `docker-compose.yml` maps those variables
+explicitly, so a missing `/data/compose/.../.env` file is not required.
+
+The example surfaces the values a deployment usually tunes:
 
 - `DOWNLOADER_BOT_TOKEN` and `TELEGRAM_BOT_TOKEN` — the two bot tokens (required).
 - `UMAP_BIKE_MAP_ID`, `UMAP_BIKE_LAYER_ID`, `UMAP_BIKE_PLANS_LAYER_ID`,
@@ -53,8 +56,8 @@ usually tunes:
 
 Everything else (Sentry environment/release, request timeouts/retries, log level,
 startup-check strictness, the optional `CHECK_*` smoke-check URLs, `UMAP_BASE_URL`,
-`UMAP_STATE_DB`, etc.) has a default in `*/config.py` and can be added to `.env`
-when you need to override it.
+`UMAP_STATE_DB`, etc.) has a default in `*/config.py` and is already listed in
+`docker-compose.yml` for stack overrides.
 
 Put cookie files in `downloader/cookies/`. `COOKIES_FILE` is used for
 TikTok/Facebook. If YouTube needs cookies, set `YOUTUBE_COOKIES_FILE` to a
