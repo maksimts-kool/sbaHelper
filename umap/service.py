@@ -570,16 +570,14 @@ class RouteWatcherService:
         reply_to_message_id: int | None,
     ) -> Message:
         text = format_route_change_notification(layer, route, changes_html)
-        send_kwargs = {
-            "chat_id": chat_id,
-            "text": text,
-            "reply_markup": self._build_route_markup(layer, route),
-        }
+        reply_markup = self._build_route_markup(layer, route)
 
         if reply_to_message_id is not None:
             try:
                 return await self._bot.send_message(
-                    **send_kwargs,
+                    chat_id=chat_id,
+                    text=text,
+                    reply_markup=reply_markup,
                     reply_parameters=ReplyParameters(message_id=reply_to_message_id),
                 )
             except TelegramBadRequest:
@@ -591,7 +589,11 @@ class RouteWatcherService:
                     chat_id,
                 )
 
-        return await self._bot.send_message(**send_kwargs)
+        return await self._bot.send_message(
+            chat_id=chat_id,
+            text=text,
+            reply_markup=reply_markup,
+        )
 
     def _cleanup_removed_routes(self, layer: WatchedLayer, current_ids: set[str]) -> None:
         known_ids = {

@@ -6,8 +6,8 @@ Sentry tracking, and startup-check result printing.
 from __future__ import annotations
 
 import logging
-from collections.abc import Callable
-from typing import Any
+from collections.abc import Callable, Sequence
+from typing import Any, Protocol, cast
 
 import sentry_sdk
 
@@ -140,7 +140,7 @@ class SentryTracker:
             environment=self._environment_getter().strip() or None,
             release=self._release_getter().strip() or None,
             traces_sample_rate=0.0,
-            before_send=self.before_send,
+            before_send=cast(Any, self.before_send),
         )
         sentry_sdk.set_tag("service", service_name)
         self._initialized = True
@@ -161,18 +161,29 @@ class SentryTracker:
 # --------------------------------------------------------------------------- #
 
 
-def result_label(result: object) -> str:
+class StartupCheckResult(Protocol):
+    @property
+    def ok(self) -> bool: ...
+
+    @property
+    def message(self) -> str: ...
+
+    @property
+    def blocks_startup(self) -> bool: ...
+
+
+def result_label(result: StartupCheckResult) -> str:
     if result.ok:
         return "OK"
-    if getattr(result, "blocks_startup", True):
+    if result.blocks_startup:
         return "FAIL"
     return "WARN"
 
 
-def result_name(result: object) -> str:
+def result_name(result: StartupCheckResult) -> str:
     return str(getattr(result, "service", getattr(result, "name", "")))
 
 
-def print_results(results: list[object]) -> None:
+def print_results(results: Sequence[StartupCheckResult]) -> None:
     for result in results:
         print(f"{result_label(result)} {result_name(result)}: {result.message}")

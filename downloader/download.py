@@ -292,7 +292,7 @@ def normalize_video_info(url: str, meta: dict, duration: int) -> VideoInfo:
             if possible_author and uploader == "Неизвестно":
                 uploader = possible_author
             if parsed_view_count is not None and (
-                view_count in (None, 0) or parsed_view_count > view_count
+                view_count is None or view_count == 0 or parsed_view_count > view_count
             ):
                 view_count = parsed_view_count
             if parsed_like_count is not None and like_count in (None, 0):

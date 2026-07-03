@@ -184,8 +184,12 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
     user = update.effective_user
     chat = update.effective_chat
+    if chat is None:
+        logger.debug("Ignored message without an effective chat.")
+        return
+
     user_label = f"{user.full_name} (id={user.id})" if user else "unknown"
-    chat_label = f"{chat.title or chat.type} (id={chat.id})" if chat else "unknown"
+    chat_label = f"{chat.title or chat.type} (id={chat.id})"
     chat_id = chat.id
 
     # Разрешаем только заданные чаты
