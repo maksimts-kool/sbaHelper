@@ -1,7 +1,6 @@
-python-telegram-bot[job-queue]>=20.0
-python-dotenv>=1.0.1
-sentry-sdk>=2.0.0
-yt-dlp
-aiogram==3.21.0
-httpx==0.28.1
-pymongo>=4.10.1
+python-telegram-bot[job-queue]>=22.8
+python-dotenv>=1.2.2
+sentry-sdk>=2.64.0
+yt-dlp>=2026.6.9
+aiogram>=3.29.1,<4
+httpx>=0.28.1

@@ -1,3 +1,8 @@
+"""
+Shared helpers used by both bots: logging setup, transient-error detection,
+Sentry tracking, and startup-check result printing.
+"""
+
 from __future__ import annotations
 
 import logging
@@ -6,8 +11,30 @@ from typing import Any
 
 import sentry_sdk
 
-
 logger = logging.getLogger(__name__)
+
+
+# --------------------------------------------------------------------------- #
+# Logging
+# --------------------------------------------------------------------------- #
+
+
+def configure_logging(
+    log_level: str = "INFO",
+    *,
+    quiet_loggers: tuple[str, ...] = (),
+) -> None:
+    logging.basicConfig(
+        level=getattr(logging, log_level.upper(), logging.INFO),
+        format="%(asctime)s %(levelname)s [%(name)s] %(message)s",
+    )
+    for logger_name in quiet_loggers:
+        logging.getLogger(logger_name).setLevel(logging.WARNING)
+
+
+# --------------------------------------------------------------------------- #
+# Transient errors + Sentry
+# --------------------------------------------------------------------------- #
 
 DEFAULT_TRANSIENT_ERROR_TEXT = (
     "all connection attempts failed",
@@ -75,9 +102,13 @@ class SentryTracker:
 
     def before_send(self, event: dict[str, Any], hint: dict[str, Any]) -> dict[str, Any] | None:
         exc_info = hint.get("exc_info")
-        if exc_info and len(exc_info) >= 2 and isinstance(exc_info[1], BaseException):
-            if self._is_transient(exc_info[1]):
-                return None
+        if (
+            exc_info
+            and len(exc_info) >= 2
+            and isinstance(exc_info[1], BaseException)
+            and self._is_transient(exc_info[1])
+        ):
+            return None
 
         logentry = event.get("logentry")
         logentry_message = logentry.get("message") if isinstance(logentry, dict) else logentry
@@ -123,3 +154,25 @@ class SentryTracker:
     def flush(self, timeout: float = 2.0) -> None:
         if self._initialized:
             sentry_sdk.flush(timeout=timeout)
+
+
+# --------------------------------------------------------------------------- #
+# Startup-check result printing
+# --------------------------------------------------------------------------- #
+
+
+def result_label(result: object) -> str:
+    if result.ok:
+        return "OK"
+    if getattr(result, "blocks_startup", True):
+        return "FAIL"
+    return "WARN"
+
+
+def result_name(result: object) -> str:
+    return str(getattr(result, "service", getattr(result, "name", "")))
+
+
+def print_results(results: list[object]) -> None:
+    for result in results:
+        print(f"{result_label(result)} {result_name(result)}: {result.message}")

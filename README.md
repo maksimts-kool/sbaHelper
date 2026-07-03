@@ -9,76 +9,94 @@ This repo runs two Telegram bots from one Docker Compose project:
 
 ```text
 .
-├── downloader/              # Python application package
-│   ├── service.py           # Settings, supported links, checks, startup, Sentry
-│   ├── bot.py               # Telegram bot setup
-│   ├── handlers.py          # Telegram message flow
-│   ├── core.py              # yt-dlp download/fetch logic
+├── shared.py                # Logging, transient-error detection, Sentry, startup printing
+├── downloader/              # yt-dlp downloader bot (python-telegram-bot)
+│   ├── config.py            # Settings, platform/URL detection, checks, Sentry
+│   ├── download.py          # yt-dlp engine: models, options, metadata, download
+│   ├── formatting.py        # Telegram caption/status formatting
+│   ├── bot.py               # Telegram app, message flow, progress, entrypoint
 │   └── cookies/             # Local cookie files, ignored by Git
-├── umap/                    # Plain Python + aiogram uMap route watcher
-│   ├── watcher.py           # Telegram bot entrypoint, runtime, and polling loops
-│   ├── settings.py          # Environment-driven uMap layer configuration
-│   ├── models.py            # Route dataclasses, GeoJSON extraction, geometry/hash helpers
-│   ├── state.py             # MongoDB-backed state store
-│   ├── client.py            # uMap HTTP client
-│   ├── checks.py            # Startup checks
-│   ├── errors.py            # Sentry and transient error handling
-│   ├── formatting.py        # Bike/plans/change Telegram formatting
-│   └── walk/formatter.py    # Walking route notification formatting
+├── umap/                    # aiogram uMap route watcher
+│   ├── config.py            # Env settings, watched layers, route models, Sentry
+│   ├── formatting.py        # Bike/plans/walk/change Telegram formatting
+│   ├── service.py           # uMap HTTP client, SQLite state store, watcher service
+│   └── bot.py               # Startup checks, polling loops, commands, entrypoint
+├── tests/
+│   ├── test_downloader.py
+│   └── test_umap.py
 ├── Dockerfile
 ├── docker-compose.yml
+├── pyproject.toml           # ruff + mypy + pytest config
 ├── requirements.txt
+├── requirements-dev.txt
 └── .env.example
 ```
 
+The packages use PEP 420 namespace packages (no `__init__.py`); run them with
+`python -m downloader.bot` and `python -m umap.bot`.
+
 ## Setup
 
-Create `.env` from `.env.example`.
+Create `.env` from `.env.example`. The example surfaces the values a deployment
+usually tunes:
 
-For the downloader bot, fill in:
+- `DOWNLOADER_BOT_TOKEN` and `TELEGRAM_BOT_TOKEN` — the two bot tokens (required).
+- `UMAP_BIKE_MAP_ID`, `UMAP_BIKE_LAYER_ID`, `UMAP_BIKE_PLANS_LAYER_ID`,
+  `UMAP_WALK_MAP_ID` — the maps/layers to watch. The bike map/layer default in
+  code; set `UMAP_WALK_MAP_ID` to also watch walking routes (the bot fetches
+  every datalayer in that map and adds the source vald/layer title to each
+  notification).
+- `MAX_FILE_SIZE_MB`, `MAX_SHORT_DURATION_SEC`, `POLL_INTERVAL_SECONDS`,
+  `CHANGE_POLL_INTERVAL_SECONDS` — limits and intervals.
+- `ALLOWED_CHAT_IDS`, `DEFAULT_SUBSCRIBER_CHAT_ID`, `COOKIES_FILE`,
+  `YOUTUBE_COOKIES_FILE`, `SENTRY_DSN` — optional.
 
-- `DOWNLOADER_BOT_TOKEN`
-- `ALLOWED_CHAT_IDS`
-- `CHECK_YOUTUBE_URL`
-- `CHECK_TIKTOK_URL`
-- `CHECK_FACEBOOK_URL`
+Everything else (Sentry environment/release, request timeouts/retries, log level,
+startup-check strictness, the optional `CHECK_*` smoke-check URLs, `UMAP_BASE_URL`,
+`UMAP_STATE_DB`, etc.) has a default in `*/config.py` and can be added to `.env`
+when you need to override it.
 
-For the uMap route bot, fill in:
+Put cookie files in `downloader/cookies/`. `COOKIES_FILE` is used for
+TikTok/Facebook. If YouTube needs cookies, set `YOUTUBE_COOKIES_FILE` to a
+separate YouTube cookie file.
 
-- `TELEGRAM_BOT_TOKEN`
-- `DEFAULT_SUBSCRIBER_CHAT_ID`, if you want one chat subscribed on first boot
-- `UMAP_STATE_MONGODB_URI`
-- `UMAP_BIKE_MAP_ID` and `UMAP_BIKE_LAYER_ID`
-- `UMAP_BIKE_PLANS_LAYER_ID`, if you want to watch the bike plans layer too
-- `UMAP_WALK_MAP_ID`, if you want to watch walking routes. The bot fetches every datalayer in that map and adds the source vald/layer title to each notification.
-
-Map links are built from `UMAP_BIKE_MAP_ID` and `UMAP_WALK_MAP_ID`.
-
-Put cookie files in `downloader/cookies/`. `COOKIES_FILE` is used for TikTok/Facebook. If YouTube needs cookies, set `YOUTUBE_COOKIES_FILE` to a separate YouTube cookie file.
-
-The uMap bot stores its state only in MongoDB. `UMAP_STATE_MONGODB_URI` is required.
+The uMap bot stores its whole state as one JSON document in a SQLite file. By
+default that file is `/data/umap_state.db`, mounted from `./data` (override with
+`UMAP_STATE_DB`). No external database is required.
 
 ## Commands
 
-For local development, use the local compose file. It starts MongoDB in the
-same project and stores data in the `mongodb-data` Docker volume, so you do not
-need to set `UMAP_STATE_MONGODB_URI` unless you want to point at another
-database:
-
-```powershell
-docker compose -f docker-compose.local.yml up --build -d
-```
-
-The default `docker-compose.yml` is intended for the Portainer deployment where
-MongoDB is already available on the external `shared-db` network.
+Build and start both bots:
 
 ```powershell
 docker compose up --build -d
 ```
 
-The bot container runs the three link checks before polling Telegram. With `STARTUP_CHECKS_REQUIRED=1`, invalid check configuration still stops startup; known unsupported content and flaky provider responses are reported as warnings.
+The `./data` directory holds the uMap SQLite state file and is created on first
+run.
 
-The uMap container runs uMap endpoint checks before polling Telegram. With `UMAP_STARTUP_CHECKS_REQUIRED=1`, failed checks stop startup.
+The downloader container runs the (now optional) link checks before polling
+Telegram. Configure `CHECK_YOUTUBE_URL` / `CHECK_TIKTOK_URL` / `CHECK_FACEBOOK_URL`
+to enable them; unset checks are skipped. With `STARTUP_CHECKS_REQUIRED=1`,
+hard check failures still stop startup, while known unsupported content and flaky
+provider responses are reported as warnings.
+
+The uMap container runs uMap endpoint checks before polling Telegram. With
+`UMAP_STARTUP_CHECKS_REQUIRED=1`, failed checks stop startup.
+
+## Automatic updates (Watchtower)
+
+[`nickfedor/watchtower`](https://github.com/nickfedor/watchtower) (a maintained,
+label-compatible fork of the archived `containrrr/watchtower`) is included under a
+`watchtower` compose profile:
+
+```powershell
+docker compose --profile watchtower up -d
+```
+
+Watchtower only updates **registry-pulled images**. For production auto-updates,
+push a tagged image and uncomment the `image:` line on `downloader-bot` (and set
+one on `umap-route-bot`); with `build: .` Watchtower is a no-op.
 
 ## uMap Bot
 
@@ -92,13 +110,30 @@ The uMap bot supports:
 - `/chatid` - show the current chat id
 - `/testnotify` - send a test route notification
 
-It stores known route IDs, route snapshots, subscribers, message IDs, and check timestamps in the `UMAP_STATE_MONGODB_COLLECTION` collection as one document.
+It stores known route IDs, route snapshots, subscribers, message IDs, and check
+timestamps as one JSON document in the SQLite state file.
 
-Bike/plans notifications use the default formatter in `umap/formatting.py`.
-Walking notifications are formatted separately:
+Bike/plans notifications use the default formatter; walking notifications are
+formatted separately in `umap/formatting.py`:
 
-- `umap/walk/formatter.py` handles walking route details from structured fields like `there_1_from`, `there_1_to`, `there_1_minutes`, `there_1_route`, and matching `back_*` fields. It still supports the legacy `Instruction` placeholder format while the data is being migrated.
-- Walking features with a checked `planned` property use the same planned-route notification titles/emojis as the bike plans layer.
+- Walking route details come from structured fields like `there_1_from`,
+  `there_1_to`, `there_1_minutes`, `there_1_route`, and matching `back_*` fields.
+  The legacy `Instruction` placeholder format is still supported while data is
+  migrated.
+- Walking features with a checked `planned` property use the same planned-route
+  notification titles/emojis as the bike plans layer.
+
+## Development
+
+```powershell
+pip install -r requirements-dev.txt
+ruff check .
+ruff format --check .
+pytest
+```
+
+CI (`.github/workflows/ci.yml`) runs ruff lint, ruff format check, and pytest on
+push/PR; mypy runs informationally.
 
 ## Error Tracking
 

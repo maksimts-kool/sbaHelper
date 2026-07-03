@@ -1,8 +1,8 @@
 """
-Downloader service wiring.
+Downloader configuration and service wiring.
 
 This is the small "front desk" for the downloader bot: environment settings,
-supported URL detection, Sentry, smoke checks, and container startup.
+platform/URL detection, Sentry, and smoke checks.
 """
 
 from __future__ import annotations
@@ -15,10 +15,17 @@ from dataclasses import dataclass
 from dotenv import load_dotenv
 from telegram.error import NetworkError
 
-from sbahelper.errors import DEFAULT_TRANSIENT_ERROR_TEXT, SentryTracker, is_transient_error
-from sbahelper.logging import configure_logging as configure_shared_logging
-from sbahelper.startup import print_results as print_startup_results
-
+from shared import (
+    DEFAULT_TRANSIENT_ERROR_TEXT,
+    SentryTracker,
+    is_transient_error,
+)
+from shared import (
+    configure_logging as configure_shared_logging,
+)
+from shared import (
+    print_results as print_startup_results,
+)
 
 load_dotenv()
 logger = logging.getLogger(__name__)
@@ -57,6 +64,25 @@ _allowed_raw = os.getenv("ALLOWED_CHAT_IDS", "")
 ALLOWED_CHAT_IDS: set[int] = {
     int(cid.strip()) for cid in _allowed_raw.split(",") if cid.strip().lstrip("-").isdigit()
 }
+
+
+# --------------------------------------------------------------------------- #
+# Platform detection
+# --------------------------------------------------------------------------- #
+
+
+def is_facebook_url(url: str) -> bool:
+    lowered = url.lower()
+    return "facebook.com" in lowered or "fb.watch" in lowered
+
+
+def is_tiktok_url(url: str) -> bool:
+    return "tiktok.com" in url.lower()
+
+
+def is_youtube_url(url: str) -> bool:
+    lowered = url.lower()
+    return "youtube.com/" in lowered or "youtu.be/" in lowered
 
 
 # --------------------------------------------------------------------------- #
@@ -175,6 +201,7 @@ def flush_error_tracking(timeout: float = 2.0) -> None:
 # Smoke checks
 # --------------------------------------------------------------------------- #
 
+
 @dataclass(frozen=True)
 class LinkCheck:
     service: str
@@ -199,10 +226,12 @@ def configured_checks() -> list[LinkCheck]:
 
 
 def run_check(check: LinkCheck) -> LinkCheckResult:
-    from downloader.core import DownloadError, UnsupportedContentError, fetch_info
+    from downloader.download import DownloadError, UnsupportedContentError, fetch_info
 
     if not check.url:
-        return LinkCheckResult(check.service, False, "missing url")
+        # Пустой CHECK_* URL — это не ошибка конфигурации, а «проверка не
+        # настроена»: пропускаем её, не блокируя запуск.
+        return LinkCheckResult(check.service, True, "not configured", blocks_startup=False)
 
     supported_url = extract_supported_url(check.url)
     if not supported_url:
@@ -245,9 +274,7 @@ def is_nonblocking_check_error(check: LinkCheck, error: BaseException) -> bool:
         return True
 
     message = str(error).lower()
-    return check.service == "tiktok" and (
-        "http error 403" in message or "forbidden" in message
-    )
+    return check.service == "tiktok" and ("http error 403" in message or "forbidden" in message)
 
 
 def print_results(results: list[LinkCheckResult]) -> None:
@@ -255,51 +282,13 @@ def print_results(results: list[LinkCheckResult]) -> None:
 
 
 def result_exit_code(results: list[LinkCheckResult]) -> int:
-    if any(result.message == "missing url" for result in results):
-        return 2
     if any(not result.ok and result.blocks_startup for result in results):
         return 1
     return 0
 
-
-# --------------------------------------------------------------------------- #
-# Entrypoints
-# --------------------------------------------------------------------------- #
 
 def configure_logging() -> None:
     configure_shared_logging(
         "INFO",
         quiet_loggers=("yt_dlp", "httpx", "httpcore"),
     )
-
-
-def run_startup_then_bot() -> int:
-    from downloader.bot import main as run_bot
-
-    configure_logging()
-    init_error_tracking("downloader-startup")
-
-    logger.info("Running startup link checks.")
-    results = run_checks()
-    print_results(results)
-    check_exit_code = result_exit_code(results)
-    flush_error_tracking()
-
-    if check_exit_code != 0:
-        if STARTUP_CHECKS_REQUIRED:
-            logger.error("Startup link checks failed with exit code %s.", check_exit_code)
-            return check_exit_code
-        logger.warning(
-            "Startup link checks failed with exit code %s. Continuing because STARTUP_CHECKS_REQUIRED=0.",
-            check_exit_code,
-        )
-
-    return run_bot()
-
-
-def main() -> int:
-    return run_startup_then_bot()
-
-
-if __name__ == "__main__":
-    raise SystemExit(main())

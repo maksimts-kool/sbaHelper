@@ -6,4 +6,7 @@ __pycache__/
 *.sqlite3
 downloader/cookies/*
 !downloader/cookies/.gitkeep
-*/__init__.py
+data/
+.ruff_cache/
+.mypy_cache/
+.pytest_cache/

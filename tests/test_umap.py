@@ -1,17 +1,50 @@
+import sys
+import types
 import unittest
 from os import environ
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from umap.formatting import build_feature_url, format_route_change_notification, route_emoji
-from umap.models import (
+
+def _install_runtime_stubs() -> None:
+    sentry_sdk = types.ModuleType("sentry_sdk")
+    sentry_sdk.init = lambda **kwargs: None
+    sentry_sdk.set_tag = lambda *args, **kwargs: None
+    sentry_sdk.capture_exception = lambda *args, **kwargs: None
+    sentry_sdk.flush = lambda *args, **kwargs: None
+    sys.modules.setdefault("sentry_sdk", sentry_sdk)
+
+    aiogram = types.ModuleType("aiogram")
+    aiogram_exceptions = types.ModuleType("aiogram.exceptions")
+
+    class TelegramNetworkError(Exception):
+        pass
+
+    aiogram_exceptions.TelegramNetworkError = TelegramNetworkError
+    aiogram.exceptions = aiogram_exceptions
+    sys.modules.setdefault("aiogram", aiogram)
+    sys.modules.setdefault("aiogram.exceptions", aiogram_exceptions)
+
+
+_install_runtime_stubs()
+
+from umap.config import (
     SOURCE_LAYER_ID_PROPERTY,
     SOURCE_LAYER_TITLE_PROPERTY,
+    RouteSnapshot,
     collect_geojson_features,
+    load_bot_settings,
     property_bool,
 )
-from umap.settings import load_bot_settings
-from umap.walk.formatter import format_route_notification, replace_placeholders, transport_emoji
+from umap.formatting import (
+    build_change_descriptions,
+    build_feature_url,
+    format_route_change_notification,
+    format_route_notification,
+    replace_placeholders,
+    route_emoji,
+    transport_emoji,
+)
 
 
 def make_layer(formatter: str = "walk") -> SimpleNamespace:
@@ -24,7 +57,9 @@ def make_layer(formatter: str = "walk") -> SimpleNamespace:
         formatter=formatter,
         route_label="пеший маршрут" if formatter == "walk" else "веломаршрут",
         new_notification_title=(
-            "Новый пеший маршрут добавлен!" if formatter == "walk" else "Новый веломаршрут добавлен!"
+            "Новый пеший маршрут добавлен!"
+            if formatter == "walk"
+            else "Новый веломаршрут добавлен!"
         ),
         change_notification_title=(
             "Изменен пеший маршрут!" if formatter == "walk" else "Изменен веломаршрут!"
@@ -191,7 +226,7 @@ class UmapFormattingTest(unittest.TestCase):
                             "geometry": {"type": "Point", "coordinates": [25, 59]},
                             "id": "one",
                         }
-                    ]
+                    ],
                 }
             ],
         }
@@ -225,7 +260,6 @@ class UmapFormattingTest(unittest.TestCase):
             environ,
             {
                 "TELEGRAM_BOT_TOKEN": "token",
-                "UMAP_STATE_MONGODB_URI": "mongodb://example",
                 "UMAP_BIKE_MAP_ID": "bike-map",
                 "UMAP_BIKE_LAYER_ID": "bike-layer",
                 "UMAP_BIKE_PLANS_LAYER_ID": "plans-layer",
@@ -251,7 +285,6 @@ class UmapFormattingTest(unittest.TestCase):
             environ,
             {
                 "TELEGRAM_BOT_TOKEN": "token",
-                "UMAP_STATE_MONGODB_URI": "mongodb://example",
                 "UMAP_BIKE_MAP_ID": "bike-map",
                 "UMAP_BIKE_LAYER_ID": "bike-layer",
                 "UMAP_WALK_MAP_ID": "walk-map",
@@ -264,7 +297,10 @@ class UmapFormattingTest(unittest.TestCase):
 
         self.assertEqual(layers["walk"].title, "Пешие маршруты")
         self.assertEqual(layers["walk"].layer_id, "")
-        self.assertEqual(settings.build_datalayer_url(layers["walk"]), "https://umap.openstreetmap.fr/en/map/walk-map/geojson/")
+        self.assertEqual(
+            settings.build_datalayer_url(layers["walk"]),
+            "https://umap.openstreetmap.fr/en/map/walk-map/geojson/",
+        )
 
     def test_walk_feature_url_uses_source_datalayer_id(self) -> None:
         layer = make_layer("walk")
@@ -279,6 +315,42 @@ class UmapFormattingTest(unittest.TestCase):
             url,
             "https://umap.openstreetmap.fr/ru/map/map_1415270?datalayers=raasiku-layer&feature=Aruk%C3%BCla",
         )
+
+
+class RouteChangeDescriptionsTest(unittest.TestCase):
+    def test_change_descriptions_are_pure_and_specific(self) -> None:
+        layer = SimpleNamespace(route_label="веломаршрут")
+        previous = RouteSnapshot(
+            feature_id="abc",
+            name="Old",
+            description="",
+            month="May",
+            osmand_speed="",
+            geometry_type="LineString",
+            geometry_hash="one",
+            details_hash="details-one",
+            length_km=10.0,
+            planned=False,
+        )
+        current = RouteSnapshot(
+            feature_id="abc",
+            name="New",
+            description="",
+            month="May",
+            osmand_speed="",
+            geometry_type="LineString",
+            geometry_hash="two",
+            details_hash="details-two",
+            length_km=10.2,
+            planned=True,
+        )
+
+        changes = build_change_descriptions(layer, previous, current)
+
+        self.assertTrue(any("Название" in change for change in changes))
+        self.assertTrue(any("В планах" in change for change in changes))
+        self.assertIn("• Детали маршрута обновлены.", changes)
+        self.assertIn("• Геометрия маршрута обновлена.", changes)
 
 
 if __name__ == "__main__":

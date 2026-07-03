@@ -3,6 +3,7 @@ import sys
 import types
 import unittest
 from contextlib import redirect_stdout
+from types import SimpleNamespace
 from unittest.mock import patch
 
 
@@ -43,15 +44,7 @@ def _install_runtime_stubs() -> None:
 
 _install_runtime_stubs()
 
-from downloader.core import (
-    DownloadError,
-    UnsupportedContentError,
-    VideoTooLongError,
-    _file_has_audio_stream,
-    fetch_info,
-)
-from downloader.metadata import pick_video_dimensions
-from downloader.service import (
+from downloader.config import (
     MAX_SHORT_DURATION_SEC,
     LinkCheck,
     LinkCheckResult,
@@ -63,13 +56,25 @@ from downloader.service import (
     result_exit_code,
     run_check,
 )
-from downloader.ytdlp_options import get_format_selector
+from downloader.download import (
+    DownloadError,
+    UnsupportedContentError,
+    VideoTooLongError,
+    _file_has_audio_stream,
+    fetch_info,
+    get_format_selector,
+    normalize_video_info,
+    parse_compact_count,
+    pick_video_dimensions,
+)
+from downloader.formatting import build_download_progress_line, build_video_caption, format_count
+from shared import print_results as shared_print_results
 
 
 class DownloaderStartupChecksTest(unittest.TestCase):
     def test_unsupported_content_warning_does_not_block_startup(self) -> None:
         with patch(
-            "downloader.core.fetch_info",
+            "downloader.download.fetch_info",
             side_effect=UnsupportedContentError("Photo posts are not supported."),
         ):
             result = run_check(LinkCheck("facebook", "https://www.facebook.com/reel/123"))
@@ -80,7 +85,7 @@ class DownloaderStartupChecksTest(unittest.TestCase):
 
     def test_tiktok_forbidden_warning_does_not_block_startup(self) -> None:
         with patch(
-            "downloader.core.fetch_info",
+            "downloader.download.fetch_info",
             side_effect=DownloadError("HTTP Error 403: Forbidden"),
         ):
             result = run_check(LinkCheck("tiktok", "https://www.tiktok.com/@user/video/123"))
@@ -89,12 +94,13 @@ class DownloaderStartupChecksTest(unittest.TestCase):
         self.assertFalse(result.blocks_startup)
         self.assertEqual(result_exit_code([result]), 0)
 
-    def test_missing_url_still_blocks_startup(self) -> None:
+    def test_missing_url_is_skipped(self) -> None:
+        # Пустой CHECK_* URL теперь не блокирует запуск, а тихо пропускается.
         result = run_check(LinkCheck("youtube", ""))
 
-        self.assertFalse(result.ok)
-        self.assertTrue(result.blocks_startup)
-        self.assertEqual(result_exit_code([result]), 2)
+        self.assertTrue(result.ok)
+        self.assertFalse(result.blocks_startup)
+        self.assertEqual(result_exit_code([result]), 0)
 
     def test_print_results_labels_nonblocking_failures_as_warnings(self) -> None:
         output = io.StringIO()
@@ -128,7 +134,7 @@ class DownloaderStartupChecksTest(unittest.TestCase):
 
     def test_audio_stream_probe_detects_audio(self) -> None:
         with patch(
-            "downloader.core.subprocess.run",
+            "downloader.download.subprocess.run",
             return_value=types.SimpleNamespace(
                 stdout='{"streams":[{"codec_type":"video"},{"codec_type":"audio"}]}'
             ),
@@ -137,7 +143,7 @@ class DownloaderStartupChecksTest(unittest.TestCase):
 
     def test_audio_stream_probe_detects_missing_audio(self) -> None:
         with patch(
-            "downloader.core.subprocess.run",
+            "downloader.download.subprocess.run",
             return_value=types.SimpleNamespace(stdout='{"streams":[{"codec_type":"video"}]}'),
         ):
             self.assertFalse(_file_has_audio_stream("/tmp/video.mp4"))
@@ -162,9 +168,7 @@ class SupportedUrlDetectionTest(unittest.TestCase):
 
     def test_extracts_link_from_surrounding_text(self) -> None:
         text = "смотри это https://www.tiktok.com/@user/video/123 круто!"
-        self.assertEqual(
-            extract_supported_url(text), "https://www.tiktok.com/@user/video/123"
-        )
+        self.assertEqual(extract_supported_url(text), "https://www.tiktok.com/@user/video/123")
 
     def test_ignores_unrelated_domain(self) -> None:
         self.assertIsNone(extract_supported_url("https://example.com/video/123"))
@@ -254,19 +258,19 @@ class FetchInfoVerificationTest(unittest.TestCase):
         # Длинное горизонтальное видео должно отклоняться как «не вертикальное»,
         # а не как «слишком длинное».
         meta = self._meta(duration=1128, width=1920, height=1080)
-        with patch("downloader.core._extract_with_retries", return_value=meta):
+        with patch("downloader.download._extract_with_retries", return_value=meta):
             with self.assertRaises(UnsupportedContentError):
                 fetch_info("https://youtu.be/abc123")
 
     def test_long_vertical_video_is_rejected_as_too_long(self) -> None:
         meta = self._meta(duration=1128, width=720, height=1280)
-        with patch("downloader.core._extract_with_retries", return_value=meta):
+        with patch("downloader.download._extract_with_retries", return_value=meta):
             with self.assertRaises(VideoTooLongError):
                 fetch_info("https://youtu.be/abc123")
 
     def test_short_vertical_video_is_accepted(self) -> None:
         meta = self._meta(duration=30, width=720, height=1280)
-        with patch("downloader.core._extract_with_retries", return_value=meta):
+        with patch("downloader.download._extract_with_retries", return_value=meta):
             info = fetch_info("https://youtu.be/abc123")
 
         self.assertEqual(info.width, 720)
@@ -274,9 +278,75 @@ class FetchInfoVerificationTest(unittest.TestCase):
 
     def test_playlist_or_profile_is_rejected(self) -> None:
         meta = {"_type": "playlist", "entries": [{"id": "a"}, {"id": "b"}]}
-        with patch("downloader.core._extract_with_retries", return_value=meta):
+        with patch("downloader.download._extract_with_retries", return_value=meta):
             with self.assertRaises(UnsupportedContentError):
                 fetch_info("https://www.tiktok.com/@ivanova197/video/123")
+
+
+class DownloaderHelpersTest(unittest.TestCase):
+    def test_downloader_count_and_progress_formatting(self) -> None:
+        self.assertEqual(format_count(999), "999")
+        self.assertEqual(format_count(1_200), "1.2K")
+        self.assertEqual(format_count(2_000_000), "2M")
+        self.assertIn("100%", build_download_progress_line(125))
+
+    def test_downloader_caption_prevents_auto_links(self) -> None:
+        info = SimpleNamespace(
+            title="Watch https://example.com #tag",
+            uploader="@creator",
+            duration=65,
+            view_count=1_500,
+            like_count=None,
+        )
+
+        caption = build_video_caption(info)
+
+        self.assertIn("1:⁠05", caption)
+        self.assertIn("h⁠ttps://example.com", caption)
+        self.assertIn("#⁠tag", caption)
+        self.assertIn("@⁠creator", caption)
+        self.assertIn("1.5K просмотров", caption)
+
+    def test_metadata_normalizes_facebook_title_stats(self) -> None:
+        info = normalize_video_info(
+            "https://www.facebook.com/reel/123",
+            {
+                "title": "1.2K views 45 reactions | Real title | Author Name",
+                "uploader": "",
+                "duration": 10,
+            },
+            10,
+        )
+
+        self.assertEqual(info.title, "Real title")
+        self.assertEqual(info.uploader, "Author Name")
+        self.assertEqual(info.view_count, 1200)
+        self.assertEqual(info.like_count, 45)
+
+    def test_metadata_parses_compact_counts(self) -> None:
+        self.assertEqual(parse_compact_count("1.5K"), 1500)
+        self.assertEqual(parse_compact_count("2 M"), 2_000_000)
+        self.assertIsNone(parse_compact_count("many"))
+
+    def test_shared_startup_printer_supports_warnings(self) -> None:
+        output = io.StringIO()
+        with redirect_stdout(output):
+            shared_print_results(
+                [
+                    SimpleNamespace(service="ok", ok=True, message="fine", blocks_startup=False),
+                    SimpleNamespace(service="warn", ok=False, message="soft", blocks_startup=False),
+                    SimpleNamespace(name="fail", ok=False, message="hard", blocks_startup=True),
+                ]
+            )
+
+        self.assertEqual(
+            output.getvalue().splitlines(),
+            [
+                "OK ok: fine",
+                "WARN warn: soft",
+                "FAIL fail: hard",
+            ],
+        )
 
 
 if __name__ == "__main__":

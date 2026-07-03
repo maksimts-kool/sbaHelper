@@ -23,8 +23,8 @@ COPY requirements.txt .
 RUN python -m pip install --upgrade pip \
     && python -m pip install --no-cache-dir -r requirements.txt
 
+COPY shared.py ./
 COPY downloader ./downloader
-COPY sbahelper ./sbahelper
 COPY umap ./umap
 
-CMD ["python", "-m", "downloader.service"]
+CMD ["python", "-m", "downloader.bot"]

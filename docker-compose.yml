@@ -1,66 +1,28 @@
-x-downloader-env: &downloader-env
-  MAX_FILE_SIZE_MB: ${MAX_FILE_SIZE_MB:-50}
-  MAX_DURATION_SEC: ${MAX_DURATION_SEC:-300}
-  MAX_SHORT_DURATION_SEC: ${MAX_SHORT_DURATION_SEC:-300}
-  COOKIES_FILE: ${COOKIES_FILE:-/app/cookies/tiktok.txt}
-  YOUTUBE_COOKIES_FILE: ${YOUTUBE_COOKIES_FILE:-}
-  CHECK_YOUTUBE_URL: ${CHECK_YOUTUBE_URL:-}
-  CHECK_TIKTOK_URL: ${CHECK_TIKTOK_URL:-}
-  CHECK_FACEBOOK_URL: ${CHECK_FACEBOOK_URL:-}
-  STARTUP_CHECKS_REQUIRED: ${STARTUP_CHECKS_REQUIRED:-1}
-  LOG_LEVEL: ${LOG_LEVEL:-INFO}
-  SENTRY_DSN: ${SENTRY_DSN:-}
-  SENTRY_ENVIRONMENT: ${SENTRY_ENVIRONMENT:-production}
-  SENTRY_RELEASE: ${SENTRY_RELEASE:-}
-
-x-downloader-volumes: &downloader-volumes
-  - /tmp/downloader_videos:/tmp/downloader_videos
-  - ./downloader/cookies:/app/cookies
-
-x-umap-env: &umap-env
-  TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN:-}
-  DEFAULT_SUBSCRIBER_CHAT_ID: ${DEFAULT_SUBSCRIBER_CHAT_ID:-}
-  UMAP_STATE_MONGODB_URI: ${UMAP_STATE_MONGODB_URI:?UMAP_STATE_MONGODB_URI is required}
-  UMAP_STATE_MONGODB_DATABASE: ${UMAP_STATE_MONGODB_DATABASE:-sbahelper}
-  UMAP_STATE_MONGODB_COLLECTION: ${UMAP_STATE_MONGODB_COLLECTION:-umap_state}
-  UMAP_BASE_URL: ${UMAP_BASE_URL:-https://umap.openstreetmap.fr}
-  UMAP_BIKE_MAP_ID: ${UMAP_BIKE_MAP_ID:-1393155}
-  UMAP_BIKE_LAYER_ID: ${UMAP_BIKE_LAYER_ID:-82e959ea-1b66-4088-b7f3-8fe6a06c3c4a}
-  UMAP_BIKE_PLANS_LAYER_ID: ${UMAP_BIKE_PLANS_LAYER_ID:-}
-  UMAP_WALK_MAP_ID: ${UMAP_WALK_MAP_ID:-}
-  POLL_INTERVAL_SECONDS: ${POLL_INTERVAL_SECONDS:-300}
-  CHANGE_POLL_INTERVAL_SECONDS: ${CHANGE_POLL_INTERVAL_SECONDS:-3600}
-  REQUEST_TIMEOUT_SECONDS: ${REQUEST_TIMEOUT_SECONDS:-30}
-  REQUEST_RETRY_ATTEMPTS: ${REQUEST_RETRY_ATTEMPTS:-3}
-  REQUEST_RETRY_BACKOFF_SECONDS: ${REQUEST_RETRY_BACKOFF_SECONDS:-2}
-  UMAP_STARTUP_CHECKS_REQUIRED: ${UMAP_STARTUP_CHECKS_REQUIRED:-1}
-  LOG_LEVEL: ${LOG_LEVEL:-INFO}
-  BOOTSTRAP_NOTIFY_EXISTING: ${BOOTSTRAP_NOTIFY_EXISTING:-false}
-  SENTRY_DSN: ${SENTRY_DSN:-}
-  SENTRY_ENVIRONMENT: ${SENTRY_ENVIRONMENT:-production}
-  SENTRY_RELEASE: ${SENTRY_RELEASE:-}
-
 services:
   downloader-bot:
     build: .
+    # image: ghcr.io/<owner>/sbahelper:latest   # set for Watchtower auto-updates
     container_name: downloader-bot
     restart: unless-stopped
-    volumes: *downloader-volumes
-    environment:
-      <<: *downloader-env
-      DOWNLOADER_BOT_TOKEN: ${DOWNLOADER_BOT_TOKEN:-}
-      ALLOWED_CHAT_IDS: ${ALLOWED_CHAT_IDS:-}
+    env_file: .env
+    volumes:
+      - ./downloader/cookies:/app/cookies
+      - /tmp/downloader_videos:/tmp/downloader_videos
+    labels: ["com.centurylinklabs.watchtower.enable=true"]
 
   umap-route-bot:
     build: .
     container_name: umap-route-bot
     restart: unless-stopped
-    command: [ "python", "-m", "umap.watcher" ]
-    networks:
-      - default
-      - shared-db
-    environment: *umap-env
+    command: ["python", "-m", "umap.bot"]
+    env_file: .env
+    volumes:
+      - ./data:/data                 # SQLite state lives here
+    labels: ["com.centurylinklabs.watchtower.enable=true"]
 
-networks:
-  shared-db:
-    external: true
+  watchtower:                        # opt-in: `docker compose --profile watchtower up -d`
+    image: nickfedor/watchtower
+    restart: unless-stopped
+    profiles: ["watchtower"]
+    volumes: ["/var/run/docker.sock:/var/run/docker.sock"]
+    command: --cleanup --label-enable --interval 3600

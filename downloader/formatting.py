@@ -3,7 +3,6 @@ from __future__ import annotations
 import html
 import re
 
-
 INFO_EMOJI = "![ℹ️](tg://emoji?id=5231012545799666522)"
 DOWNLOAD_EMOJI = "![⬇️](tg://emoji?id=5386367538735104399)"
 SEND_VIDEO_EMOJI = "![📤](tg://emoji?id=5201691993775818138)"
@@ -38,8 +37,14 @@ def format_count(value: int | None) -> str:
 
 def prevent_auto_links(text: str) -> str:
     sanitized = text.replace("#", "#\u2060").replace("@", "@\u2060")
-    sanitized = re.sub(r"(?i)\bhttps?://", lambda m: m.group(0)[0] + "\u2060" + m.group(0)[1:], sanitized)
-    sanitized = re.sub(r"\b(\d{1,2}):(\d{2})(?::(\d{2}))?\b", lambda m: m.group(0).replace(":", ":\u2060"), sanitized)
+    sanitized = re.sub(
+        r"(?i)\bhttps?://", lambda m: m.group(0)[0] + "\u2060" + m.group(0)[1:], sanitized
+    )
+    sanitized = re.sub(
+        r"\b(\d{1,2}):(\d{2})(?::(\d{2}))?\b",
+        lambda m: m.group(0).replace(":", ":\u2060"),
+        sanitized,
+    )
     return sanitized
 
 
@@ -48,17 +53,19 @@ def build_video_caption(info) -> str:
     title = html.escape(prevent_auto_links(info.title))
     uploader = html.escape(prevent_auto_links(info.uploader))
     lines = [
-        f"🎬 <b>{title}</b> | <tg-emoji emoji-id=\"{LENGTH_EMOJI_ID}\">⏱️</tg-emoji> {duration_text}"
+        f'🎬 <b>{title}</b> | <tg-emoji emoji-id="{LENGTH_EMOJI_ID}">⏱️</tg-emoji> {duration_text}'
     ]
 
     if info.view_count is not None:
         lines.append(
-            f"<tg-emoji emoji-id=\"{VIEWS_EMOJI_ID}\">👁️</tg-emoji> {format_count(info.view_count)} просмотров"
+            f'<tg-emoji emoji-id="{VIEWS_EMOJI_ID}">👁️</tg-emoji> '
+            f"{format_count(info.view_count)} просмотров"
         )
 
     if info.like_count is not None:
         lines.append(
-            f"<tg-emoji emoji-id=\"{LIKES_EMOJI_ID}\">❤️</tg-emoji> {format_count(info.like_count)} лайков"
+            f'<tg-emoji emoji-id="{LIKES_EMOJI_ID}">❤️</tg-emoji> '
+            f"{format_count(info.like_count)} лайков"
         )
 
     lines.append(f"👤 {uploader}")
