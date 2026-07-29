@@ -25,6 +25,5 @@ RUN python -m pip install --upgrade pip \
 
 COPY shared.py ./
 COPY downloader ./downloader
-COPY umap ./umap
 
 CMD ["python", "-m", "downloader.bot"]

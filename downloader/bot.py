@@ -1,7 +1,7 @@
 """
 Downloader Bot: Telegram application, message handling, progress tracking,
 and the container entrypoint (startup link checks, then polling).
-Listens for TikTok, YouTube, and Facebook links.
+Listens for TikTok and YouTube links.
 """
 
 from __future__ import annotations
@@ -9,7 +9,9 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import sqlite3
 import threading
+from datetime import datetime, timedelta
 
 from telegram import BotCommand, Message, Update
 from telegram.constants import ChatAction
@@ -29,7 +31,14 @@ from downloader.config import (
     MAX_FILE_SIZE_MB,
     MAX_SHORT_DURATION_SEC,
     STARTUP_CHECKS_REQUIRED,
+    STATS_DB_PATH,
+    STATS_ENABLED,
+    STATS_RETENTION_DAYS,
+    STATS_TIMEZONE,
+    STATS_WEEKLY_AT,
+    STATS_WEEKLY_WEEKDAY,
     capture_exception,
+    detect_platform,
     extract_supported_url,
     flush_error_tracking,
     init_error_tracking,
@@ -58,8 +67,16 @@ from downloader.formatting import (
     build_download_progress_line,
     build_status_text,
     build_video_caption,
+    build_weekly_stats_message,
     escape_md_v2,
     format_duration,
+)
+from downloader.stats import (
+    DownloadEvent,
+    StatsStore,
+    resolve_timezone,
+    sunday_based_weekday,
+    week_period,
 )
 from shared import configure_logging
 
@@ -67,6 +84,9 @@ logger = logging.getLogger(__name__)
 
 # Через сколько секунд удалять сообщение с ошибкой проверки ссылки.
 REJECTION_DELETE_DELAY_SEC = 5.0
+
+STATS_STORE_KEY = "stats_store"
+STATS_TZ = resolve_timezone(STATS_TIMEZONE)
 
 
 # --------------------------------------------------------------------------- #
@@ -97,6 +117,136 @@ class ProgressStage:
 def rounded_progress_percent(raw_percent: float) -> int:
     bounded = min(100, max(0, int(raw_percent)))
     return (bounded // 10) * 10
+
+
+# --------------------------------------------------------------------------- #
+#  Статистика                                                                  #
+# --------------------------------------------------------------------------- #
+
+
+def open_stats_store() -> StatsStore | None:
+    """Открывает базу статистики. Если не вышло — бот работает без статистики."""
+    if not STATS_ENABLED:
+        logger.info("Download statistics are disabled (STATS_ENABLED=0).")
+        return None
+
+    try:
+        return StatsStore(STATS_DB_PATH)
+    except (OSError, sqlite3.Error) as e:
+        capture_exception(e)
+        logger.error("Could not open the statistics database %s: %s", STATS_DB_PATH, e)
+        return None
+
+
+def get_stats_store(context: ContextTypes.DEFAULT_TYPE) -> StatsStore | None:
+    store = context.bot_data.get(STATS_STORE_KEY)
+    return store if isinstance(store, StatsStore) else None
+
+
+async def record_download(
+    context: ContextTypes.DEFAULT_TYPE,
+    *,
+    chat_id: int,
+    user,
+    url: str,
+    info,
+    size_bytes: int,
+) -> None:
+    """Записывает отправленное видео. Ошибка записи не должна ломать загрузку."""
+    store = get_stats_store(context)
+    if store is None:
+        return
+
+    event = DownloadEvent(
+        chat_id=chat_id,
+        user_id=user.id if user else 0,
+        user_name=user.full_name if user else "Неизвестно",
+        platform=detect_platform(url),
+        duration_sec=info.duration or 0,
+        size_bytes=size_bytes,
+        title=info.title,
+        uploader=info.uploader,
+        view_count=info.view_count,
+    )
+
+    try:
+        await asyncio.to_thread(store.record, event)
+    except Exception as e:
+        capture_exception(e)
+        logger.warning("Could not record download statistics: %s", e)
+
+
+async def _send_weekly_stats(context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Раз в неделю: каждому чату — его собственная сводка. Тихие чаты пропускаем."""
+    store = get_stats_store(context)
+    if store is None:
+        return
+
+    start, end = week_period(datetime.now(STATS_TZ))
+
+    try:
+        chat_ids = await asyncio.to_thread(store.active_chat_ids, start, end)
+    except sqlite3.Error as e:
+        capture_exception(e)
+        logger.error("Could not read weekly statistics: %s", e)
+        return
+
+    for chat_id in chat_ids:
+        if ALLOWED_CHAT_IDS and chat_id not in ALLOWED_CHAT_IDS:
+            continue
+
+        stats = await asyncio.to_thread(store.weekly_stats, chat_id=chat_id, start=start, end=end)
+        if not stats.total_downloads:
+            continue
+
+        try:
+            await context.bot.send_message(
+                chat_id=chat_id,
+                text=build_weekly_stats_message(stats),
+                parse_mode="HTML",
+            )
+        except TelegramError as e:
+            logger.warning("Could not send weekly statistics to chat %s: %s", chat_id, e)
+        else:
+            logger.info(
+                "Sent weekly statistics to chat %s (%d downloads).",
+                chat_id,
+                stats.total_downloads,
+            )
+
+    if STATS_RETENTION_DAYS:
+        cutoff = end - timedelta(days=STATS_RETENTION_DAYS)
+        try:
+            removed = await asyncio.to_thread(store.prune, older_than=cutoff)
+        except sqlite3.Error as e:
+            logger.warning("Could not prune old statistics: %s", e)
+        else:
+            if removed:
+                logger.info("Pruned %d statistics rows older than %s.", removed, cutoff.date())
+
+
+def schedule_weekly_stats(application) -> None:
+    if application.bot_data.get(STATS_STORE_KEY) is None:
+        return
+
+    job_queue = application.job_queue
+    if job_queue is None:
+        logger.warning("JobQueue is unavailable; weekly statistics will not be sent.")
+        return
+
+    send_at = STATS_WEEKLY_AT.replace(tzinfo=STATS_TZ)
+    job_queue.run_daily(
+        _send_weekly_stats,
+        time=send_at,
+        days=(sunday_based_weekday(STATS_WEEKLY_WEEKDAY),),
+        name="weekly-stats",
+    )
+    logger.info(
+        "Weekly statistics scheduled: weekday %s at %s (%s).",
+        STATS_WEEKLY_WEEKDAY,
+        STATS_WEEKLY_AT.strftime("%H:%M"),
+        STATS_TIMEZONE,
+    )
 
 
 # --------------------------------------------------------------------------- #
@@ -317,6 +467,12 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         return
 
     logger.info("[%s] Download complete: %s", chat_label, result.file_path)
+    # Размер нужен для статистики — файл удаляется сразу после отправки.
+    try:
+        file_size_bytes = os.path.getsize(result.file_path)
+    except OSError:
+        file_size_bytes = 0
+
     await _safe_edit(
         status_msg,
         build_status_text(
@@ -366,6 +522,15 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     if not sent_successfully:
         return
 
+    await record_download(
+        context,
+        chat_id=chat_id,
+        user=user,
+        url=url,
+        info=result.info,
+        size_bytes=file_size_bytes,
+    )
+
 
 # --------------------------------------------------------------------------- #
 #  Приложение и точка входа                                                    #
@@ -379,13 +544,11 @@ def _configure_logging() -> None:
 
 async def _cmd_start(update, context) -> None:
     await update.message.reply_text(
-        "Привет! Я скачиваю <b>короткие</b> видео из <b>TikTok</b>, "
-        "<b>YouTube Shorts</b> и <b>Facebook</b>.\n\n"
+        "Привет! Я скачиваю <b>короткие</b> видео из <b>TikTok</b> "
+        "и <b>YouTube Shorts</b>.\n\n"
         "Просто отправь мне ссылку на видео с любого из этих сайтов:\n"
         "- <code>https://www.tiktok.com/...</code>\n"
-        "- <code>https://youtube.com/shorts/...</code>\n"
-        "- <code>https://www.facebook.com/reel/...</code>\n"
-        "- <code>https://fb.watch/...</code>\n\n"
+        "- <code>https://youtube.com/shorts/...</code>\n\n"
         "Я проверю ссылку и скачаю видео, если это короткий вертикальный ролик "
         f"(до {MAX_SHORT_DURATION_SEC // 60} мин). Горизонтальные и длинные видео, "
         "фото- и обычные посты не поддерживаются.\n\n"
@@ -394,8 +557,35 @@ async def _cmd_start(update, context) -> None:
     )
 
 
+async def _cmd_stats(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    message = update.effective_message
+    chat = update.effective_chat
+    if message is None or chat is None:
+        return
+
+    if ALLOWED_CHAT_IDS and chat.id not in ALLOWED_CHAT_IDS:
+        return
+
+    store = get_stats_store(context)
+    if store is None:
+        await message.reply_text("Статистика сейчас не ведётся.")
+        return
+
+    start, end = week_period(datetime.now(STATS_TZ))
+    stats = await asyncio.to_thread(store.weekly_stats, chat_id=chat.id, start=start, end=end)
+    await message.reply_text(
+        build_weekly_stats_message(stats, title="Текущая неделя"),
+        parse_mode="HTML",
+    )
+
+
 async def _post_init(app) -> None:
-    await app.bot.set_my_commands([BotCommand("start", "Информация о боте")])
+    await app.bot.set_my_commands(
+        [
+            BotCommand("start", "Информация о боте"),
+            BotCommand("stats", "Статистика за текущую неделю"),
+        ]
+    )
     me = await app.bot.get_me()
     logger.info("Downloader bot started: @%s (id=%s)", me.username, me.id)
     if ALLOWED_CHAT_IDS:
@@ -449,7 +639,11 @@ def run_bot() -> int:
         .build()
     )
 
+    application.bot_data[STATS_STORE_KEY] = open_stats_store()
+    schedule_weekly_stats(application)
+
     application.add_handler(CommandHandler("start", _cmd_start))
+    application.add_handler(CommandHandler("stats", _cmd_stats))
     application.add_handler(MessageHandler(filters.TEXT | filters.CAPTION, handle_message))
     application.add_error_handler(_error_handler)
     application.run_polling(

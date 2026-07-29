@@ -1,6 +1,6 @@
 """
 Ядро загрузки видео.
-Использует yt-dlp для скачивания видео с TikTok / YouTube Shorts / Facebook.
+Использует yt-dlp для скачивания видео с TikTok / YouTube Shorts.
 
 Здесь собраны модели, опции yt-dlp, нормализация метаданных и сам движок загрузки.
 """
@@ -27,7 +27,6 @@ from downloader.config import (
     MAX_SHORT_DURATION_SEC,
     YOUTUBE_COOKIES_FILE,
     exceeds_short_limit,
-    is_facebook_url,
     is_tiktok_url,
     is_vertical_video,
     is_youtube_url,
@@ -153,13 +152,6 @@ def get_format_selector(url: str) -> str:
             "best[ext=mp4][height<=1080]/best[height<=1080]/best"
         )
 
-    if is_facebook_url(url):
-        return (
-            "best[ext=mp4][height<=1080]/best[height<=1080]/"
-            "bestvideo[height<=1080][vcodec!=none]+bestaudio/"
-            "best"
-        )
-
     if is_tiktok_url(url):
         size_limit = f"{MAX_FILE_SIZE_MB}M"
         return (
@@ -272,32 +264,6 @@ def normalize_video_info(url: str, meta: dict, duration: int) -> VideoInfo:
     view_count = pick_first_int(meta, "view_count", "play_count")
     like_count = pick_first_int(meta, "like_count", "repost_count")
 
-    if is_facebook_url(url) and isinstance(title, str):
-        parts = [part.strip() for part in title.split("|")]
-        if len(parts) >= 3:
-            stats_part = parts[0]
-            possible_title = " | ".join(part for part in parts[1:-1] if part)
-            possible_author = parts[-1]
-
-            view_match = re.search(r"([\d.,KMBkmb]+)\s+views\b", stats_part, re.IGNORECASE)
-            reaction_match = re.search(r"([\d.,KMBkmb]+)\s+reactions?\b", stats_part, re.IGNORECASE)
-
-            parsed_view_count = parse_compact_count(view_match.group(1)) if view_match else None
-            parsed_like_count = (
-                parse_compact_count(reaction_match.group(1)) if reaction_match else None
-            )
-
-            if possible_title:
-                title = possible_title
-            if possible_author and uploader == "Неизвестно":
-                uploader = possible_author
-            if parsed_view_count is not None and (
-                view_count is None or view_count == 0 or parsed_view_count > view_count
-            ):
-                view_count = parsed_view_count
-            if parsed_like_count is not None and like_count in (None, 0):
-                like_count = parsed_like_count
-
     if is_tiktok_url(url):
         if looks_like_generated_tiktok_title(title):
             better_title = pick_first_text(meta, "description", "fulltitle", "alt_title")
@@ -399,28 +365,13 @@ def _file_has_audio_stream(file_path: str) -> bool | None:
     return any(stream.get("codec_type") == "audio" for stream in data.get("streams") or [])
 
 
-def _rewrite_download_error(url: str, err_msg: str) -> str:
+def _rewrite_download_error(err_msg: str) -> str:
     lower_err = err_msg.lower()
     if any(token in lower_err for token in _DNS_ERROR_TOKENS):
         return (
             "Не удалось обратиться к сайту из-за DNS/сетевой ошибки. "
             "Бот уже сделал несколько автоматических попыток, но адрес всё ещё не резолвится. "
             "Проверьте DNS и доступ в интернет у контейнера/сервера."
-        )
-    if is_facebook_url(url) and any(
-        token in lower_err
-        for token in (
-            "login required",
-            "not logged in",
-            "requires authentication",
-            "please log in",
-            "content isn't available",
-            "video unavailable",
-        )
-    ):
-        return (
-            "Facebook запросил авторизацию. Укажите свежий COOKIES_FILE "
-            "в формате Netscape cookies.txt."
         )
     return err_msg
 
@@ -475,7 +426,7 @@ def fetch_info(url: str) -> VideoInfo:
     try:
         meta = _extract_with_retries(url, ydl_opts, download=False)
     except yt_dlp.utils.DownloadError as e:
-        err_msg = _rewrite_download_error(url, str(e))
+        err_msg = _rewrite_download_error(str(e))
         if "unsupported url" in err_msg.lower() and (
             "/photo/" in url.lower() or "/photo/" in err_msg.lower()
         ):
@@ -559,7 +510,7 @@ def download_video(
     try:
         meta = _extract_with_retries(url, ydl_opts, download=True)
     except yt_dlp.utils.DownloadError as e:
-        raise DownloadError(_rewrite_download_error(url, str(e))) from e
+        raise DownloadError(_rewrite_download_error(str(e))) from e
 
     duration = int(meta.get("duration") or 0)
     if duration > MAX_DURATION_SEC:

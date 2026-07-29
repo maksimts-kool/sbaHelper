@@ -1,0 +1,258 @@
+"""
+Статистика загрузок: SQLite-хранилище событий и недельная агрегация.
+
+Записывается только успешно отправленное видео — одна строка на отправку.
+Из этих строк собирается сводка за неделю: таблица лидеров, разбивка по
+площадкам и «хит недели». Текст сообщения строится в `downloader/formatting.py`.
+"""
+
+from __future__ import annotations
+
+import logging
+import os
+import sqlite3
+from collections import Counter
+from collections.abc import Iterator, Sequence
+from contextlib import contextmanager
+from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone, tzinfo
+from typing import Any
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
+
+logger = logging.getLogger(__name__)
+
+# Сколько человек показываем поимённо; остальные сворачиваются в «ещё N».
+TOP_USERS_LIMIT = 3
+
+_SCHEMA = """
+CREATE TABLE IF NOT EXISTS downloads (
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    created_at   TEXT    NOT NULL,
+    chat_id      INTEGER NOT NULL,
+    user_id      INTEGER NOT NULL,
+    user_name    TEXT    NOT NULL,
+    platform     TEXT    NOT NULL,
+    duration_sec INTEGER NOT NULL,
+    size_bytes   INTEGER NOT NULL,
+    title        TEXT    NOT NULL,
+    uploader     TEXT    NOT NULL,
+    view_count   INTEGER
+);
+CREATE INDEX IF NOT EXISTS downloads_chat_created_idx ON downloads (chat_id, created_at);
+CREATE INDEX IF NOT EXISTS downloads_created_idx ON downloads (created_at);
+"""
+
+
+# --------------------------------------------------------------------------- #
+#  Модели                                                                      #
+# --------------------------------------------------------------------------- #
+
+
+@dataclass(frozen=True)
+class DownloadEvent:
+    chat_id: int
+    user_id: int
+    user_name: str
+    platform: str
+    duration_sec: int = 0
+    size_bytes: int = 0
+    title: str = ""
+    uploader: str = ""
+    view_count: int | None = None
+
+
+@dataclass(frozen=True)
+class UserTally:
+    name: str
+    downloads: int
+
+
+@dataclass(frozen=True)
+class PlatformTally:
+    platform: str
+    downloads: int
+
+
+@dataclass(frozen=True)
+class TopVideo:
+    title: str
+    uploader: str
+    view_count: int
+
+
+@dataclass(frozen=True)
+class WeeklyStats:
+    period_start: datetime
+    period_end: datetime
+    total_downloads: int
+    total_duration_sec: int
+    total_size_bytes: int
+    top_users: tuple[UserTally, ...]
+    # Участники, не попавшие в топ, и сколько видео они скачали вместе.
+    other_users: int
+    other_downloads: int
+    platforms: tuple[PlatformTally, ...]
+    top_video: TopVideo | None
+
+
+# --------------------------------------------------------------------------- #
+#  Время                                                                       #
+# --------------------------------------------------------------------------- #
+
+
+def resolve_timezone(name: str) -> tzinfo:
+    """Часовой пояс по названию из IANA; при неудаче — UTC, чтобы не падать."""
+    try:
+        return ZoneInfo(name)
+    except (ZoneInfoNotFoundError, ValueError):
+        logger.warning("Unknown timezone %r, falling back to UTC.", name)
+        return timezone.utc
+
+
+def week_period(now: datetime) -> tuple[datetime, datetime]:
+    """Текущая неделя: с понедельника 00:00 до `now` в том же часовом поясе."""
+    midnight = now.replace(hour=0, minute=0, second=0, microsecond=0)
+    return midnight - timedelta(days=now.weekday()), now
+
+
+def sunday_based_weekday(monday_based: int) -> int:
+    """`datetime.weekday()` считает от понедельника, JobQueue — от воскресенья."""
+    return (monday_based + 1) % 7
+
+
+def _utc_text(moment: datetime) -> str:
+    """Метка времени для SQLite: UTC ISO-8601 без микросекунд, сравнимая как текст."""
+    aware = moment if moment.tzinfo is not None else moment.replace(tzinfo=timezone.utc)
+    return aware.astimezone(timezone.utc).replace(microsecond=0).isoformat()
+
+
+# --------------------------------------------------------------------------- #
+#  Агрегация                                                                   #
+# --------------------------------------------------------------------------- #
+
+
+def aggregate_weekly_stats(
+    rows: Sequence[tuple[Any, ...]],
+    *,
+    period_start: datetime,
+    period_end: datetime,
+) -> WeeklyStats:
+    """Собирает сводку из строк вида, который отдаёт `StatsStore.weekly_stats`."""
+    user_names: dict[int, str] = {}
+    user_counts: Counter[int] = Counter()
+    platform_counts: Counter[str] = Counter()
+    total_duration = 0
+    total_size = 0
+    top_video: TopVideo | None = None
+
+    for user_id, user_name, platform, duration_sec, size_bytes, title, uploader, views in rows:
+        user_key = int(user_id)
+        # Имя могло измениться — оставляем последнее известное.
+        user_names[user_key] = str(user_name)
+        user_counts[user_key] += 1
+        platform_counts[str(platform)] += 1
+        total_duration += int(duration_sec or 0)
+        total_size += int(size_bytes or 0)
+
+        if views is not None and (top_video is None or int(views) > top_video.view_count):
+            top_video = TopVideo(str(title), str(uploader), int(views))
+
+    ranked = sorted(user_counts.items(), key=lambda item: (-item[1], user_names[item[0]].lower()))
+    tail = ranked[TOP_USERS_LIMIT:]
+
+    return WeeklyStats(
+        period_start=period_start,
+        period_end=period_end,
+        total_downloads=len(rows),
+        total_duration_sec=total_duration,
+        total_size_bytes=total_size,
+        top_users=tuple(
+            UserTally(user_names[user_id], count) for user_id, count in ranked[:TOP_USERS_LIMIT]
+        ),
+        other_users=len(tail),
+        other_downloads=sum(count for _, count in tail),
+        platforms=tuple(
+            PlatformTally(platform, count)
+            for platform, count in sorted(
+                platform_counts.items(), key=lambda item: (-item[1], item[0])
+            )
+        ),
+        top_video=top_video,
+    )
+
+
+def empty_weekly_stats(period_start: datetime, period_end: datetime) -> WeeklyStats:
+    return aggregate_weekly_stats((), period_start=period_start, period_end=period_end)
+
+
+# --------------------------------------------------------------------------- #
+#  Хранилище                                                                   #
+# --------------------------------------------------------------------------- #
+
+
+class StatsStore:
+    """Одна строка на успешно отправленное видео, в одном файле SQLite."""
+
+    def __init__(self, path: str) -> None:
+        self._path = path
+        parent = os.path.dirname(path)
+        if parent:
+            os.makedirs(parent, exist_ok=True)
+        with self._connect() as conn:
+            conn.executescript(_SCHEMA)
+
+    @contextmanager
+    def _connect(self) -> Iterator[sqlite3.Connection]:
+        conn = sqlite3.connect(self._path)
+        try:
+            yield conn
+            conn.commit()
+        finally:
+            conn.close()
+
+    def record(self, event: DownloadEvent, *, at: datetime | None = None) -> None:
+        with self._connect() as conn:
+            conn.execute(
+                "INSERT INTO downloads (created_at, chat_id, user_id, user_name, platform, "
+                "duration_sec, size_bytes, title, uploader, view_count) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    _utc_text(at or datetime.now(timezone.utc)),
+                    event.chat_id,
+                    event.user_id,
+                    event.user_name,
+                    event.platform,
+                    event.duration_sec,
+                    event.size_bytes,
+                    event.title,
+                    event.uploader,
+                    event.view_count,
+                ),
+            )
+
+    def active_chat_ids(self, start: datetime, end: datetime) -> list[int]:
+        """Чаты, в которых за период что-то скачали."""
+        with self._connect() as conn:
+            rows = conn.execute(
+                "SELECT DISTINCT chat_id FROM downloads "
+                "WHERE created_at >= ? AND created_at < ? ORDER BY chat_id",
+                (_utc_text(start), _utc_text(end)),
+            ).fetchall()
+        return [int(row[0]) for row in rows]
+
+    def weekly_stats(self, *, chat_id: int, start: datetime, end: datetime) -> WeeklyStats:
+        with self._connect() as conn:
+            rows = conn.execute(
+                "SELECT user_id, user_name, platform, duration_sec, size_bytes, "
+                "title, uploader, view_count FROM downloads "
+                "WHERE chat_id = ? AND created_at >= ? AND created_at < ? ORDER BY created_at",
+                (chat_id, _utc_text(start), _utc_text(end)),
+            ).fetchall()
+        return aggregate_weekly_stats(rows, period_start=start, period_end=end)
+
+    def prune(self, *, older_than: datetime) -> int:
+        with self._connect() as conn:
+            cursor = conn.execute(
+                "DELETE FROM downloads WHERE created_at < ?", (_utc_text(older_than),)
+            )
+            return cursor.rowcount

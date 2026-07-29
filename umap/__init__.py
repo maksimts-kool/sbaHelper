@@ -1,1 +1,0 @@
-"""uMap route bot package."""

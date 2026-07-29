@@ -11,6 +11,7 @@ import logging
 import os
 import re
 from dataclasses import dataclass
+from datetime import time
 
 from dotenv import load_dotenv
 from telegram.error import NetworkError
@@ -35,6 +36,44 @@ logger = logging.getLogger(__name__)
 # Settings
 # --------------------------------------------------------------------------- #
 
+_FALSEY_ENV_VALUES = {"0", "false", "no", "off"}
+
+
+def env_flag(name: str, *, default: bool) -> bool:
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    return raw.strip().lower() not in _FALSEY_ENV_VALUES
+
+
+def env_int(name: str, default: int) -> int:
+    """Читает целое из окружения, не роняя бота на опечатке в стеке."""
+    raw = (os.getenv(name) or "").strip()
+    if not raw:
+        return default
+    try:
+        return int(raw)
+    except ValueError:
+        logger.warning("%s=%r is not an integer, using %s instead.", name, raw, default)
+        return default
+
+
+def env_clock_time(name: str, default: time) -> time:
+    """Читает время суток в формате `ЧЧ:ММ`."""
+    raw = (os.getenv(name) or "").strip()
+    if not raw:
+        return default
+
+    match = re.fullmatch(r"(\d{1,2}):(\d{2})", raw)
+    if match:
+        hour, minute = int(match.group(1)), int(match.group(2))
+        if 0 <= hour <= 23 and 0 <= minute <= 59:
+            return time(hour=hour, minute=minute)
+
+    logger.warning("%s=%r is not a HH:MM time, using %s instead.", name, raw, default)
+    return default
+
+
 DOWNLOADER_BOT_TOKEN = os.getenv("DOWNLOADER_BOT_TOKEN", "")
 MAX_FILE_SIZE_MB = int(os.getenv("MAX_FILE_SIZE_MB", "50"))
 MAX_DURATION_SEC = int(os.getenv("MAX_DURATION_SEC", "600"))
@@ -48,13 +87,16 @@ YOUTUBE_COOKIES_FILE = os.getenv("YOUTUBE_COOKIES_FILE", "").strip()
 
 CHECK_YOUTUBE_URL = os.getenv("CHECK_YOUTUBE_URL", "").strip()
 CHECK_TIKTOK_URL = os.getenv("CHECK_TIKTOK_URL", "").strip()
-CHECK_FACEBOOK_URL = os.getenv("CHECK_FACEBOOK_URL", "").strip()
-STARTUP_CHECKS_REQUIRED = os.getenv("STARTUP_CHECKS_REQUIRED", "1").strip().lower() not in {
-    "0",
-    "false",
-    "no",
-    "off",
-}
+STARTUP_CHECKS_REQUIRED = env_flag("STARTUP_CHECKS_REQUIRED", default=True)
+
+# Недельная статистика загрузок. День недели задаётся как в `datetime.weekday()`:
+# 0 — понедельник, 6 — воскресенье.
+STATS_ENABLED = env_flag("STATS_ENABLED", default=True)
+STATS_DB_PATH = os.getenv("STATS_DB_PATH", "/data/downloader_stats.db").strip()
+STATS_TIMEZONE = os.getenv("STATS_TIMEZONE", "").strip() or "Europe/Tallinn"
+STATS_WEEKLY_WEEKDAY = min(6, max(0, env_int("STATS_WEEKLY_WEEKDAY", 6)))
+STATS_WEEKLY_AT = env_clock_time("STATS_WEEKLY_TIME", time(hour=20))
+STATS_RETENTION_DAYS = max(0, env_int("STATS_RETENTION_DAYS", 400))
 
 SENTRY_DSN = os.getenv("SENTRY_DSN", "").strip()
 SENTRY_ENVIRONMENT = os.getenv("SENTRY_ENVIRONMENT", "production").strip()
@@ -71,11 +113,6 @@ ALLOWED_CHAT_IDS: set[int] = {
 # --------------------------------------------------------------------------- #
 
 
-def is_facebook_url(url: str) -> bool:
-    lowered = url.lower()
-    return "facebook.com" in lowered or "fb.watch" in lowered
-
-
 def is_tiktok_url(url: str) -> bool:
     return "tiktok.com" in url.lower()
 
@@ -83,6 +120,15 @@ def is_tiktok_url(url: str) -> bool:
 def is_youtube_url(url: str) -> bool:
     lowered = url.lower()
     return "youtube.com/" in lowered or "youtu.be/" in lowered
+
+
+def detect_platform(url: str) -> str:
+    """Площадка ссылки — ключ разбивки в недельной статистике."""
+    if is_tiktok_url(url):
+        return "tiktok"
+    if is_youtube_url(url):
+        return "youtube"
+    return "other"
 
 
 # --------------------------------------------------------------------------- #
@@ -97,8 +143,6 @@ SUPPORTED_URL_PATTERNS: list[re.Pattern[str]] = [
     re.compile(r"https?://(?:[\w-]+\.)?tiktok\.com/\S+", re.IGNORECASE),
     re.compile(r"https?://(?:[\w-]+\.)?youtube\.com/\S+", re.IGNORECASE),
     re.compile(r"https?://youtu\.be/\S+", re.IGNORECASE),
-    re.compile(r"https?://(?:[\w-]+\.)?facebook\.com/\S+", re.IGNORECASE),
-    re.compile(r"https?://fb\.watch/\S+", re.IGNORECASE),
 ]
 
 
@@ -125,12 +169,6 @@ _NON_VIDEO_URL_PATTERNS: list[re.Pattern[str]] = [
         r"(?:@[^/?#\s]+|channel/|c/|user/|playlist\b|feed/|results\b|hashtag/|shorts/?(?:[?#]|$))",
         re.IGNORECASE,
     ),
-    # Facebook: профили, группы, разделы.
-    re.compile(
-        r"https?://(?:[\w-]+\.)?facebook\.com/"
-        r"(?:profile\.php|people/|groups/|marketplace/|events/|gaming(?:/|\b)|pages/)",
-        re.IGNORECASE,
-    ),
 ]
 
 
@@ -142,7 +180,7 @@ def is_non_video_url(url: str) -> bool:
 def exceeds_short_limit(duration: int) -> bool:
     """True, если видео длиннее допустимой длины «короткого» ролика.
 
-    Применяется ко всем поддерживаемым платформам (YouTube, TikTok, Facebook):
+    Применяется ко всем поддерживаемым платформам (YouTube, TikTok):
     бот скачивает только короткие видео (shorts/reels), а не полноразмерные.
     Длительность 0 (неизвестна) считается допустимой и не отклоняется здесь.
     """
@@ -221,7 +259,6 @@ def configured_checks() -> list[LinkCheck]:
     return [
         LinkCheck("youtube", CHECK_YOUTUBE_URL),
         LinkCheck("tiktok", CHECK_TIKTOK_URL),
-        LinkCheck("facebook", CHECK_FACEBOOK_URL),
     ]
 
 

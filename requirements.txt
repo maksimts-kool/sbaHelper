@@ -2,5 +2,3 @@ python-telegram-bot[job-queue]>=22.8
 python-dotenv>=1.2.2
 sentry-sdk>=2.64.0
 yt-dlp>=2026.6.9
-aiogram>=3.29.1,<4
-httpx>=0.28.1

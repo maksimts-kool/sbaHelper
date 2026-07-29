@@ -1,0 +1,71 @@
+# Portainer → Stacks → Add stack → Web editor. Paste this file and set the
+# stack environment variables (see README.md → "Portainer stack").
+#
+# Differences from the local `docker-compose.yml`:
+#   - pulls a published image instead of building (Portainer's web editor has
+#     no build context);
+#   - state lives in named volumes, not in paths relative to the stack folder;
+#   - Watchtower runs unconditionally — Portainer's UI cannot select a compose
+#     profile, so a profiled service would simply never start.
+
+services:
+  downloader-bot:
+    image: ghcr.io/maksimts-kool/sbahelper:latest
+    container_name: downloader-bot
+    restart: unless-stopped
+    environment:
+      # Обязательный: без него стек не развернётся.
+      DOWNLOADER_BOT_TOKEN: "${DOWNLOADER_BOT_TOKEN:?set DOWNLOADER_BOT_TOKEN in the stack environment}"
+
+      LOG_LEVEL: "${LOG_LEVEL:-INFO}"
+      ALLOWED_CHAT_IDS: "${ALLOWED_CHAT_IDS:-}"
+
+      SENTRY_DSN: "${SENTRY_DSN:-}"
+      SENTRY_ENVIRONMENT: "${SENTRY_ENVIRONMENT:-production}"
+      SENTRY_RELEASE: "${SENTRY_RELEASE:-}"
+
+      MAX_FILE_SIZE_MB: "${MAX_FILE_SIZE_MB:-50}"
+      MAX_DURATION_SEC: "${MAX_DURATION_SEC:-600}"
+      MAX_SHORT_DURATION_SEC: "${MAX_SHORT_DURATION_SEC:-300}"
+      DOWNLOAD_DIR: "${DOWNLOAD_DIR:-/tmp/downloader_videos}"
+      COOKIES_FILE: "${COOKIES_FILE:-/app/cookies/cookies.txt}"
+      YOUTUBE_COOKIES_FILE: "${YOUTUBE_COOKIES_FILE:-}"
+
+      CHECK_YOUTUBE_URL: "${CHECK_YOUTUBE_URL:-}"
+      CHECK_TIKTOK_URL: "${CHECK_TIKTOK_URL:-}"
+      STARTUP_CHECKS_REQUIRED: "${STARTUP_CHECKS_REQUIRED:-1}"
+
+      STATS_ENABLED: "${STATS_ENABLED:-1}"
+      STATS_DB_PATH: "${STATS_DB_PATH:-/data/downloader_stats.db}"
+      STATS_TIMEZONE: "${STATS_TIMEZONE:-Europe/Tallinn}"
+      STATS_WEEKLY_WEEKDAY: "${STATS_WEEKLY_WEEKDAY:-6}"   # 0 = понедельник, 6 = воскресенье
+      STATS_WEEKLY_TIME: "${STATS_WEEKLY_TIME:-20:00}"
+      STATS_RETENTION_DAYS: "${STATS_RETENTION_DAYS:-400}"
+    volumes:
+      # Файлы cookies кладутся на хост вручную — в образ они не попадают.
+      # Каталог должен существовать до разворачивания стека.
+      - "${COOKIES_HOST_DIR:-/opt/sbahelper/cookies}:/app/cookies"
+      - stats-data:/data                       # SQLite со статистикой загрузок
+      - download-tmp:/tmp/downloader_videos    # временные файлы, чистятся после отправки
+    labels: ["com.centurylinklabs.watchtower.enable=true"]
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  watchtower:
+    image: nickfedor/watchtower
+    container_name: downloader-watchtower
+    restart: unless-stopped
+    volumes: ["/var/run/docker.sock:/var/run/docker.sock"]
+    command: --cleanup --label-enable --interval 3600
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+volumes:
+  stats-data:
+  download-tmp:

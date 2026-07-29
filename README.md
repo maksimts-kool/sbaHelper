@@ -1,9 +1,8 @@
-# SBA Helper Bots
+# SBA Helper Bot
 
-This repo runs two Telegram bots from one Docker Compose project:
-
-- `downloader-bot` downloads supported videos from YouTube Shorts, TikTok, and Facebook.
-- `umap-route-bot` watches uMap route layers and sends Telegram notifications for new or changed routes.
+`downloader-bot` is a Telegram bot that downloads short vertical videos from
+YouTube Shorts and TikTok, and posts a weekly download summary to each group it
+works in.
 
 ## Structure
 
@@ -13,118 +12,176 @@ This repo runs two Telegram bots from one Docker Compose project:
 ├── downloader/              # yt-dlp downloader bot (python-telegram-bot)
 │   ├── config.py            # Settings, platform/URL detection, checks, Sentry
 │   ├── download.py          # yt-dlp engine: models, options, metadata, download
-│   ├── formatting.py        # Telegram caption/status formatting
-│   ├── bot.py               # Telegram app, message flow, progress, entrypoint
+│   ├── stats.py             # SQLite download log + weekly aggregation
+│   ├── formatting.py        # Telegram caption/status/statistics formatting
+│   ├── bot.py               # Telegram app, message flow, progress, jobs, entrypoint
 │   └── cookies/             # Local cookie files, ignored by Git
-├── umap/                    # aiogram uMap route watcher
-│   ├── config.py            # Env settings, watched layers, route models, Sentry
-│   ├── formatting.py        # Bike/plans/walk/change Telegram formatting
-│   ├── service.py           # uMap HTTP client, SQLite state store, watcher service
-│   └── bot.py               # Startup checks, polling loops, commands, entrypoint
 ├── tests/
-│   ├── test_downloader.py
-│   └── test_umap.py
+│   ├── conftest.py          # Stubs the runtime deps so tests need no network/binaries
+│   ├── test_config.py
+│   ├── test_download.py
+│   ├── test_formatting.py
+│   └── test_stats.py
 ├── Dockerfile
 ├── docker-compose.yml
-├── pyproject.toml           # ruff + mypy + pytest config
+├── pyproject.toml           # ruff + pytest config
 ├── requirements.txt
 ├── requirements-dev.txt
 └── .env.example
 ```
 
-Run the packages with `python -m downloader.bot` and `python -m umap.bot`.
+Run the bot with `python -m downloader.bot`.
 
 ## Setup
 
-For local Docker Compose, create `.env` from `.env.example`. For Portainer or
-other stack deployers, set the same keys as stack environment variables instead
-of relying on a physical `.env` file. `docker-compose.yml` maps those variables
-explicitly, so a missing `/data/compose/.../.env` file is not required.
+There are two compose files:
+
+- `docker-compose.yml` — local development. Builds from the `Dockerfile`, keeps
+  state in `./data`, reads `.env` (copy it from `.env.example`).
+- `docker-compose.portainer.yml` — production. Pulls the published image, keeps
+  state in named volumes, reads Portainer stack environment variables. See
+  [Portainer stack](#portainer-stack).
+
+Both map every variable explicitly, so a missing `/data/compose/.../.env` file
+is never required.
 
 The example surfaces the values a deployment usually tunes:
 
-- `DOWNLOADER_BOT_TOKEN` and `TELEGRAM_BOT_TOKEN` — the two bot tokens (required).
-- `UMAP_BIKE_MAP_ID`, `UMAP_BIKE_LAYER_ID`, `UMAP_BIKE_PLANS_LAYER_ID`,
-  `UMAP_WALK_MAP_ID` — the maps/layers to watch. The bike map/layer default in
-  code; set `UMAP_WALK_MAP_ID` to also watch walking routes (the bot fetches
-  every datalayer in that map and adds the source vald/layer title to each
-  notification).
-- `MAX_FILE_SIZE_MB`, `MAX_SHORT_DURATION_SEC`, `POLL_INTERVAL_SECONDS`,
-  `CHANGE_POLL_INTERVAL_SECONDS` — limits and intervals.
-- `ALLOWED_CHAT_IDS`, `DEFAULT_SUBSCRIBER_CHAT_ID`, `COOKIES_FILE`,
-  `YOUTUBE_COOKIES_FILE`, `SENTRY_DSN` — optional.
+- `DOWNLOADER_BOT_TOKEN` — the bot token (required).
+- `MAX_FILE_SIZE_MB`, `MAX_SHORT_DURATION_SEC` — limits.
+- `STATS_WEEKLY_WEEKDAY`, `STATS_WEEKLY_TIME`, `STATS_TIMEZONE` — when the
+  weekly summary is posted.
+- `ALLOWED_CHAT_IDS`, `COOKIES_FILE`, `YOUTUBE_COOKIES_FILE`, `SENTRY_DSN` —
+  optional.
 
-Everything else (Sentry environment/release, request timeouts/retries, log level,
-startup-check strictness, the optional `CHECK_*` smoke-check URLs, `UMAP_BASE_URL`,
-`UMAP_STATE_DB`, etc.) has a default in `*/config.py` and is already listed in
-`docker-compose.yml` for stack overrides.
+Everything else (Sentry environment/release, log level, startup-check
+strictness, the optional `CHECK_*` smoke-check URLs, `STATS_DB_PATH`,
+`STATS_ENABLED`, `STATS_RETENTION_DAYS`) has a default in `downloader/config.py`
+and is already listed in both compose files for stack overrides.
 
-Put cookie files in `downloader/cookies/`. `COOKIES_FILE` is used for
-TikTok/Facebook. If YouTube needs cookies, set `YOUTUBE_COOKIES_FILE` to a
-separate YouTube cookie file.
-
-The uMap bot stores its whole state as one JSON document in a SQLite file. By
-default that file is `/data/umap_state.db`, mounted from `./data` (override with
-`UMAP_STATE_DB`). No external database is required.
+Put cookie files in `downloader/cookies/`. `COOKIES_FILE` is used for TikTok.
+If YouTube needs cookies, set `YOUTUBE_COOKIES_FILE` to a separate YouTube
+cookie file.
 
 ## Commands
 
-Build and start both bots:
+Build and start the bot:
 
 ```powershell
 docker compose up --build -d
 ```
 
-The `./data` directory holds the uMap SQLite state file and is created on first
+The `./data` directory holds the statistics SQLite file and is created on first
 run.
 
-The downloader container runs the (now optional) link checks before polling
-Telegram. Configure `CHECK_YOUTUBE_URL` / `CHECK_TIKTOK_URL` / `CHECK_FACEBOOK_URL`
-to enable them; unset checks are skipped. With `STARTUP_CHECKS_REQUIRED=1`,
-hard check failures still stop startup, while known unsupported content and flaky
-provider responses are reported as warnings.
+The container runs the (optional) link checks before polling Telegram.
+Configure `CHECK_YOUTUBE_URL` / `CHECK_TIKTOK_URL` to enable them; unset checks
+are skipped. With `STARTUP_CHECKS_REQUIRED=1`, hard check failures still stop
+startup, while known unsupported content and flaky provider responses are
+reported as warnings.
 
-The uMap container runs uMap endpoint checks before polling Telegram. With
-`UMAP_STARTUP_CHECKS_REQUIRED=1`, failed checks stop startup.
+Telegram commands:
 
-## Automatic updates (Watchtower)
+- `/start` — what the bot does and which links it accepts
+- `/stats` — this week's summary so far, for the current chat
 
-[`nickfedor/watchtower`](https://github.com/nickfedor/watchtower) (a maintained,
-label-compatible fork of the archived `containrrr/watchtower`) is included under a
-`watchtower` compose profile:
+## Weekly statistics
 
-```powershell
-docker compose --profile watchtower up -d
+Every successfully sent video is logged as one row in a SQLite file
+(`STATS_DB_PATH`, default `/data/downloader_stats.db`): timestamp, chat, user,
+platform, duration, file size, title, uploader, and view count. Nothing else is
+stored — rejected links and errors are not logged.
+
+Once a week the bot posts a per-chat summary. Each group sees only its own
+downloads, and groups with no downloads that week get no message:
+
+```text
+📊 Итоги недели · 20–26 июля
+
+Скачано: 47 видео · 1 ч 12 мин · 812 МБ
+
+🏆 Кто больше всех
+🥇 Максим — 21
+🥈 Аня — 14
+🥉 Пётр — 8
+   ещё 3 участника — 4
+
+📱 Откуда
+TikTok   ▓▓▓▓▓▓▓░░░  33
+YouTube  ▓▓▓░░░░░░░  14
+
+🔥 Хит недели
+«Кот открывает холодильник» — 2.4M 👁
 ```
 
-Watchtower only updates **registry-pulled images**. For production auto-updates,
-push a tagged image and uncomment the `image:` line on `downloader-bot` (and set
-one on `umap-route-bot`); with `build: .` Watchtower is a no-op.
+Defaults: Sunday at 20:00 `Europe/Tallinn`, covering that week from Monday
+00:00 up to the moment the message is sent. Downloads made after the Sunday
+send time fall outside both that report and the next one, which starts at
+Monday 00:00 — move `STATS_WEEKLY_TIME` later, or `STATS_WEEKLY_WEEKDAY` to `0`
+(Monday), if that tail matters.
 
-## uMap Bot
+- `STATS_WEEKLY_WEEKDAY` uses `datetime.weekday()` numbering: `0` = Monday,
+  `6` = Sunday.
+- `STATS_ENABLED=0` turns logging, `/stats`, and the weekly job off.
+- `STATS_RETENTION_DAYS` (default `400`) prunes older rows after each weekly
+  run; `0` keeps everything.
+- "🔥 Хит недели" is shown only when at least one video that week reported a
+  view count.
 
-The uMap bot supports:
+## Portainer stack
 
-- `/start` - show available commands
-- `/subscribe` - subscribe the current chat
-- `/unsubscribe` - unsubscribe the current chat
-- `/status` - show layer and subscriber status
-- `/check` - run an immediate new-route check
-- `/chatid` - show the current chat id
-- `/testnotify` - send a test route notification
+Production runs from the published image, not from a build.
 
-It stores known route IDs, route snapshots, subscribers, message IDs, and check
-timestamps as one JSON document in the SQLite state file.
+**1. Publish the image.** `.github/workflows/ci.yml` builds and pushes
+`ghcr.io/maksimts-kool/sbahelper` on every green push to `main`. The `publish`
+job is gated on `lint-and-test`, so a red commit is never deployed.
 
-Bike/plans notifications use the default formatter; walking notifications are
-formatted separately in `umap/formatting.py`:
+**2. Make the package pullable.** GHCR packages are **private by default**, and
+a private package makes the stack fail with `denied` / `manifest unknown`. After
+the first successful publish, either:
 
-- Walking route details come from structured fields like `there_1_from`,
-  `there_1_to`, `there_1_minutes`, `there_1_route`, and matching `back_*` fields.
-  The legacy `Instruction` placeholder format is still supported while data is
-  migrated.
-- Walking features with a checked `planned` property use the same planned-route
-  notification titles/emojis as the bike plans layer.
+- GitHub → Packages → `sbahelper` → Package settings → Change visibility →
+  Public; or
+- keep it private and add a GHCR registry in Portainer (Registries → Custom
+  registry, `ghcr.io`, your username, a PAT with `read:packages`).
+
+**3. Create the host cookie directory** before deploying, otherwise Docker
+creates it root-owned and empty:
+
+```bash
+mkdir -p /opt/sbahelper/cookies
+# put cookies.txt here (TikTok); YouTube cookies only if needed
+```
+
+**4. Deploy.** Portainer → Stacks → Add stack → Web editor, paste
+`docker-compose.portainer.yml`, and set the stack environment variables:
+
+| Variable | Required | Notes |
+| --- | --- | --- |
+| `DOWNLOADER_BOT_TOKEN` | yes | Deploy fails fast if unset |
+| `ALLOWED_CHAT_IDS` | no | Comma-separated; empty means the bot answers everywhere |
+| `COOKIES_HOST_DIR` | no | Host cookie directory, default `/opt/sbahelper/cookies` |
+| `STATS_WEEKLY_WEEKDAY` / `STATS_WEEKLY_TIME` / `STATS_TIMEZONE` | no | Weekly summary schedule |
+| `SENTRY_DSN` | no | Error tracking |
+
+Everything else falls back to the defaults baked into the compose file.
+
+Two Portainer-specific details in that file: state lives in **named volumes**
+(`stats-data`, `download-tmp`) rather than paths relative to the stack folder,
+and Watchtower runs **without a compose profile** — Portainer's UI cannot select
+profiles, so a profiled service would silently never start.
+
+### Automatic updates (Watchtower)
+
+[`nickfedor/watchtower`](https://github.com/nickfedor/watchtower) (a maintained,
+label-compatible fork of the archived `containrrr/watchtower`) ships in the
+Portainer stack and checks hourly for a new `:latest`, pulling and restarting
+`downloader-bot` when it finds one. Only containers labelled
+`com.centurylinklabs.watchtower.enable=true` are touched.
+
+In the local `docker-compose.yml` it sits behind a `watchtower` profile
+(`docker compose --profile watchtower up -d`) and is a no-op there, because
+Watchtower only updates registry-pulled images and local dev builds from source.
 
 ## Development
 
@@ -136,11 +193,11 @@ pytest
 ```
 
 CI (`.github/workflows/ci.yml`) runs ruff lint, ruff format check, and pytest on
-push/PR; mypy runs informationally.
+push/PR. All three must pass.
 
 ## Error Tracking
 
-Both bots support optional Sentry error tracking through:
+The bot supports optional Sentry error tracking through:
 
 - `SENTRY_DSN`
 - `SENTRY_ENVIRONMENT`

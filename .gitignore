@@ -8,5 +8,4 @@ downloader/cookies/*
 !downloader/cookies/.gitkeep
 data/
 .ruff_cache/
-.mypy_cache/
 .pytest_cache/

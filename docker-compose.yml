@@ -1,58 +1,37 @@
-x-bot-environment: &bot-environment
-  DOWNLOADER_BOT_TOKEN: "${DOWNLOADER_BOT_TOKEN:-}"
-  TELEGRAM_BOT_TOKEN: "${TELEGRAM_BOT_TOKEN:-}"
-  LOG_LEVEL: "${LOG_LEVEL:-INFO}"
-  SENTRY_DSN: "${SENTRY_DSN:-}"
-  SENTRY_ENVIRONMENT: "${SENTRY_ENVIRONMENT:-production}"
-  SENTRY_RELEASE: "${SENTRY_RELEASE:-}"
-  ALLOWED_CHAT_IDS: "${ALLOWED_CHAT_IDS:-}"
-  DEFAULT_SUBSCRIBER_CHAT_ID: "${DEFAULT_SUBSCRIBER_CHAT_ID:-}"
-
-  MAX_FILE_SIZE_MB: "${MAX_FILE_SIZE_MB:-50}"
-  MAX_DURATION_SEC: "${MAX_DURATION_SEC:-600}"
-  MAX_SHORT_DURATION_SEC: "${MAX_SHORT_DURATION_SEC:-300}"
-  DOWNLOAD_DIR: "${DOWNLOAD_DIR:-/tmp/downloader_videos}"
-  COOKIES_FILE: "${COOKIES_FILE:-/app/cookies/cookies.txt}"
-  YOUTUBE_COOKIES_FILE: "${YOUTUBE_COOKIES_FILE:-}"
-  CHECK_YOUTUBE_URL: "${CHECK_YOUTUBE_URL:-}"
-  CHECK_TIKTOK_URL: "${CHECK_TIKTOK_URL:-}"
-  CHECK_FACEBOOK_URL: "${CHECK_FACEBOOK_URL:-}"
-  STARTUP_CHECKS_REQUIRED: "${STARTUP_CHECKS_REQUIRED:-1}"
-
-  UMAP_BIKE_MAP_ID: "${UMAP_BIKE_MAP_ID:-1393155}"
-  UMAP_BIKE_LAYER_ID: "${UMAP_BIKE_LAYER_ID:-82e959ea-1b66-4088-b7f3-8fe6a06c3c4a}"
-  UMAP_BIKE_PLANS_LAYER_ID: "${UMAP_BIKE_PLANS_LAYER_ID:-e62ab6f9-0c21-4521-93c5-df47a4857fda}"
-  UMAP_WALK_MAP_ID: "${UMAP_WALK_MAP_ID:-1415270}"
-  UMAP_STATE_DB: "${UMAP_STATE_DB:-/data/umap_state.db}"
-  UMAP_BASE_URL: "${UMAP_BASE_URL:-https://umap.openstreetmap.fr}"
-  POLL_INTERVAL_SECONDS: "${POLL_INTERVAL_SECONDS:-300}"
-  CHANGE_POLL_INTERVAL_SECONDS: "${CHANGE_POLL_INTERVAL_SECONDS:-3600}"
-  REQUEST_TIMEOUT_SECONDS: "${REQUEST_TIMEOUT_SECONDS:-30}"
-  REQUEST_RETRY_ATTEMPTS: "${REQUEST_RETRY_ATTEMPTS:-3}"
-  REQUEST_RETRY_BACKOFF_SECONDS: "${REQUEST_RETRY_BACKOFF_SECONDS:-2}"
-  BOOTSTRAP_NOTIFY_EXISTING: "${BOOTSTRAP_NOTIFY_EXISTING:-0}"
-  UMAP_STARTUP_CHECKS_REQUIRED: "${UMAP_STARTUP_CHECKS_REQUIRED:-1}"
-
 services:
   downloader-bot:
     build: .
     # image: ghcr.io/<owner>/sbahelper:latest   # set for Watchtower auto-updates
     container_name: downloader-bot
     restart: unless-stopped
-    environment: *bot-environment
+    environment:
+      DOWNLOADER_BOT_TOKEN: "${DOWNLOADER_BOT_TOKEN:-}"
+      LOG_LEVEL: "${LOG_LEVEL:-INFO}"
+      SENTRY_DSN: "${SENTRY_DSN:-}"
+      SENTRY_ENVIRONMENT: "${SENTRY_ENVIRONMENT:-production}"
+      SENTRY_RELEASE: "${SENTRY_RELEASE:-}"
+      ALLOWED_CHAT_IDS: "${ALLOWED_CHAT_IDS:-}"
+
+      MAX_FILE_SIZE_MB: "${MAX_FILE_SIZE_MB:-50}"
+      MAX_DURATION_SEC: "${MAX_DURATION_SEC:-600}"
+      MAX_SHORT_DURATION_SEC: "${MAX_SHORT_DURATION_SEC:-300}"
+      DOWNLOAD_DIR: "${DOWNLOAD_DIR:-/tmp/downloader_videos}"
+      COOKIES_FILE: "${COOKIES_FILE:-/app/cookies/cookies.txt}"
+      YOUTUBE_COOKIES_FILE: "${YOUTUBE_COOKIES_FILE:-}"
+      CHECK_YOUTUBE_URL: "${CHECK_YOUTUBE_URL:-}"
+      CHECK_TIKTOK_URL: "${CHECK_TIKTOK_URL:-}"
+      STARTUP_CHECKS_REQUIRED: "${STARTUP_CHECKS_REQUIRED:-1}"
+
+      STATS_ENABLED: "${STATS_ENABLED:-1}"
+      STATS_DB_PATH: "${STATS_DB_PATH:-/data/downloader_stats.db}"
+      STATS_TIMEZONE: "${STATS_TIMEZONE:-Europe/Tallinn}"
+      STATS_WEEKLY_WEEKDAY: "${STATS_WEEKLY_WEEKDAY:-6}"   # 0 = понедельник, 6 = воскресенье
+      STATS_WEEKLY_TIME: "${STATS_WEEKLY_TIME:-20:00}"
+      STATS_RETENTION_DAYS: "${STATS_RETENTION_DAYS:-400}"
     volumes:
       - ./downloader/cookies:/app/cookies
+      - ./data:/data                 # SQLite со статистикой загрузок
       - /tmp/downloader_videos:/tmp/downloader_videos
-    labels: ["com.centurylinklabs.watchtower.enable=true"]
-
-  umap-route-bot:
-    build: .
-    container_name: umap-route-bot
-    restart: unless-stopped
-    command: ["python", "-m", "umap.bot"]
-    environment: *bot-environment
-    volumes:
-      - ./data:/data                 # SQLite state lives here
     labels: ["com.centurylinklabs.watchtower.enable=true"]
 
   watchtower:                        # opt-in: `docker compose --profile watchtower up -d`

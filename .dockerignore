@@ -13,5 +13,4 @@ tests
 requirements-dev.txt
 data/
 .ruff_cache/
-.mypy_cache/
 .pytest_cache/
