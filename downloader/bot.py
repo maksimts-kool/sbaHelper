@@ -74,6 +74,7 @@ from downloader.formatting import (
 from downloader.stats import (
     DownloadEvent,
     StatsStore,
+    has_visible_text,
     resolve_timezone,
     sunday_based_weekday,
     week_period,
@@ -143,6 +144,21 @@ def get_stats_store(context: ContextTypes.DEFAULT_TYPE) -> StatsStore | None:
     return store if isinstance(store, StatsStore) else None
 
 
+def user_label_for(user) -> str:
+    """Подпись пользователя для логов и статистики.
+
+    Имя в Telegram можно собрать из невидимых символов — тогда берём `@username`,
+    а если и его нет, остаётся только id.
+    """
+    if user is None:
+        return "Неизвестно"
+    if has_visible_text(user.full_name):
+        return user.full_name
+    if user.username:
+        return f"@{user.username}"
+    return f"Участник {user.id}"
+
+
 async def record_download(
     context: ContextTypes.DEFAULT_TYPE,
     *,
@@ -160,7 +176,7 @@ async def record_download(
     event = DownloadEvent(
         chat_id=chat_id,
         user_id=user.id if user else 0,
-        user_name=user.full_name if user else "Неизвестно",
+        user_name=user_label_for(user),
         platform=detect_platform(url),
         duration_sec=info.duration or 0,
         size_bytes=size_bytes,
@@ -338,7 +354,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         logger.debug("Ignored message without an effective chat.")
         return
 
-    user_label = f"{user.full_name} (id={user.id})" if user else "unknown"
+    user_label = f"{user_label_for(user)} (id={user.id})" if user else "unknown"
     chat_label = f"{chat.title or chat.type} (id={chat.id})"
     chat_id = chat.id
 

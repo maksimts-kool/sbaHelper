@@ -10,12 +10,17 @@ from downloader.stats import (
     StatsStore,
     aggregate_weekly_stats,
     empty_weekly_stats,
+    has_visible_text,
     resolve_timezone,
     sunday_based_weekday,
     week_period,
 )
 
 UTC = timezone.utc
+
+# Имя из невидимых символов: NBSP, HANGUL FILLER и VARIATION SELECTOR-15.
+# Такие ставят, чтобы висеть первым в списке участников группы.
+INVISIBLE_NAME = "\xa0\u3164 \ufe0e \ufe0e\xa0"
 
 
 def row(
@@ -52,6 +57,21 @@ class WeekPeriodTests(unittest.TestCase):
 
     def test_unknown_timezone_falls_back_to_utc(self):
         self.assertEqual(resolve_timezone("Nowhere/Nothing"), UTC)
+
+
+class VisibleTextTests(unittest.TestCase):
+    def test_ordinary_names_are_visible(self):
+        for name in ("Максим", "A", "@nick", "  Аня  ", "3"):
+            with self.subTest(name=name):
+                self.assertTrue(has_visible_text(name))
+
+    def test_blank_and_invisible_names_are_not(self):
+        for name in ("", " ", INVISIBLE_NAME, "\u200b\u2060", "\u2800\u2800"):
+            with self.subTest(name=repr(name)):
+                self.assertFalse(has_visible_text(name))
+
+    def test_visible_character_next_to_invisible_ones_still_counts(self):
+        self.assertTrue(has_visible_text(INVISIBLE_NAME + "я"))
 
 
 class AggregateTests(unittest.TestCase):
@@ -100,6 +120,15 @@ class AggregateTests(unittest.TestCase):
     def test_latest_name_wins_for_the_same_user(self):
         stats = self.aggregate([row(1, "Старое имя"), row(1, "Новое имя")])
         self.assertEqual(stats.top_users[0].name, "Новое имя")
+
+    def test_invisible_name_falls_back_to_the_user_id(self):
+        # Имя из невидимых символов не должно давать пустую строку в топе.
+        stats = self.aggregate([row(1083346705, INVISIBLE_NAME)])
+        self.assertEqual(stats.top_users[0].name, "Участник 1083346705")
+
+    def test_invisible_name_without_user_id_falls_back_to_unknown(self):
+        stats = self.aggregate([row(0, INVISIBLE_NAME)])
+        self.assertEqual(stats.top_users[0].name, "Неизвестно")
 
     def test_equal_counts_are_ordered_by_name(self):
         stats = self.aggregate([row(2, "Яна"), row(1, "Артём")])

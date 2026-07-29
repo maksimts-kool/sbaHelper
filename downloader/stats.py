@@ -11,6 +11,7 @@ from __future__ import annotations
 import logging
 import os
 import sqlite3
+import unicodedata
 from collections import Counter
 from collections.abc import Iterator, Sequence
 from contextlib import contextmanager
@@ -23,6 +24,18 @@ logger = logging.getLogger(__name__)
 
 # Сколько человек показываем поимённо; остальные сворачиваются в «ещё N».
 TOP_USERS_LIMIT = 3
+
+# Пробелы (Zs/Zl/Zp), управляющие и форматирующие символы (Cc/Cf), комбинирующие
+# знаки без собственной ширины (Mn/Me) — всё это Telegram рисует пустотой.
+_BLANK_CATEGORIES = frozenset({"Cc", "Cf", "Mn", "Me", "Zs", "Zl", "Zp"})
+# А эти Unicode считает буквами или символами, хотя глиф у них пустой. Из таких
+# и собирают «невидимые» имена, чтобы висеть первым в списке участников.
+# Записаны кодами намеренно: в исходнике их иначе не видно.
+_BLANK_CHARS = frozenset(
+    # HANGUL CHOSEONG/JUNGSEONG FILLER, HANGUL FILLER, HALFWIDTH HANGUL FILLER,
+    # BRAILLE PATTERN BLANK, MONGOLIAN VOWEL SEPARATOR, KHMER INHERENT AQ/AA.
+    "\u115f\u1160\u3164\uffa0\u2800\u180e\u17b4\u17b5"
+)
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS downloads (
@@ -96,6 +109,32 @@ class WeeklyStats:
 
 
 # --------------------------------------------------------------------------- #
+#  Имена                                                                       #
+# --------------------------------------------------------------------------- #
+
+
+def has_visible_text(value: str) -> bool:
+    """Останется ли хоть один видимый символ, если убрать пробелы и пустые глифы.
+
+    Простой `strip()` тут не работает: HANGUL FILLER (U+3164) Unicode относит
+    к буквам (категория `Lo`), а VARIATION SELECTOR-15 (U+FE0E) — к
+    комбинирующим знакам, и `isspace()` для обоих даёт `False`. При этом имя,
+    собранное из них, Telegram показывает пустым.
+    """
+    return any(
+        char not in _BLANK_CHARS and unicodedata.category(char) not in _BLANK_CATEGORIES
+        for char in value
+    )
+
+
+def display_user_name(raw: str, user_id: int) -> str:
+    """Подпись для таблицы лидеров: невидимое имя заменяем на что-то читаемое."""
+    if has_visible_text(raw):
+        return raw
+    return f"Участник {user_id}" if user_id else "Неизвестно"
+
+
+# --------------------------------------------------------------------------- #
 #  Время                                                                       #
 # --------------------------------------------------------------------------- #
 
@@ -147,8 +186,9 @@ def aggregate_weekly_stats(
 
     for user_id, user_name, platform, duration_sec, size_bytes, title, uploader, views in rows:
         user_key = int(user_id)
-        # Имя могло измениться — оставляем последнее известное.
-        user_names[user_key] = str(user_name)
+        # Имя могло измениться — оставляем последнее известное. Подменяем здесь,
+        # а не только при записи, чтобы старые строки тоже не выглядели пустыми.
+        user_names[user_key] = display_user_name(str(user_name), user_key)
         user_counts[user_key] += 1
         platform_counts[str(platform)] += 1
         total_duration += int(duration_sec or 0)
