@@ -88,6 +88,9 @@ YOUTUBE_COOKIES_FILE = os.getenv("YOUTUBE_COOKIES_FILE", "").strip()
 CHECK_YOUTUBE_URL = os.getenv("CHECK_YOUTUBE_URL", "").strip()
 CHECK_TIKTOK_URL = os.getenv("CHECK_TIKTOK_URL", "").strip()
 STARTUP_CHECKS_REQUIRED = env_flag("STARTUP_CHECKS_REQUIRED", default=True)
+# Проверка не только читает метаданные, но и скачивает тестовое видео целиком.
+# Это добавляет ~10-20 секунд к старту, зато ловит поломку загрузки сразу.
+STARTUP_CHECK_DOWNLOAD = env_flag("STARTUP_CHECK_DOWNLOAD", default=True)
 
 # Недельная статистика загрузок. День недели задаётся как в `datetime.weekday()`:
 # 0 — понедельник, 6 — воскресенье.
@@ -262,8 +265,29 @@ def configured_checks() -> list[LinkCheck]:
     ]
 
 
+def download_test_video(url: str) -> float:
+    """Скачивает тестовое видео целиком и удаляет его, вернув размер в МБ.
+
+    Гоняет тот же путь, что и обычная загрузка: выбор формата, yt-dlp, склейку
+    ffmpeg, проверку аудиодорожки у TikTok и лимит размера. Поэтому сломанный
+    экстрактор или протухшие cookies видно при старте, а не на первой ссылке.
+    """
+    from downloader.download import cleanup, download_video
+
+    result = download_video(url)
+    try:
+        return os.path.getsize(result.file_path) / (1024 * 1024)
+    finally:
+        cleanup(result.file_path)
+
+
 def run_check(check: LinkCheck) -> LinkCheckResult:
-    from downloader.download import DownloadError, UnsupportedContentError, fetch_info
+    from downloader.download import (
+        DownloadError,
+        UnsupportedContentError,
+        VideoTooLongError,
+        fetch_info,
+    )
 
     if not check.url:
         # Пустой CHECK_* URL — это не ошибка конфигурации, а «проверка не
@@ -276,7 +300,12 @@ def run_check(check: LinkCheck) -> LinkCheckResult:
 
     try:
         info = fetch_info(supported_url)
-    except UnsupportedContentError as error:
+        details = f"{info.duration}s"
+        if STARTUP_CHECK_DOWNLOAD:
+            details = f"{details}, {download_test_video(supported_url):.1f} MB"
+    except (UnsupportedContentError, VideoTooLongError) as error:
+        # Фикстура не подходит боту (фото-пост, длинное видео) — это ошибка в
+        # самой проверке, а не поломка бота, поэтому старт не блокируем.
         return LinkCheckResult(check.service, False, str(error), blocks_startup=False)
     except DownloadError as error:
         blocks_startup = not is_nonblocking_check_error(check, error)
@@ -296,7 +325,7 @@ def run_check(check: LinkCheck) -> LinkCheckResult:
     return LinkCheckResult(
         check.service,
         True,
-        f"{info.title} by {info.uploader} ({info.duration}s)",
+        f"{info.title} by {info.uploader} ({details})",
         info,
         blocks_startup=False,
     )

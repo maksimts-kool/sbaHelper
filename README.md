@@ -74,11 +74,31 @@ docker compose up --build -d
 The `./data` directory holds the statistics SQLite file and is created on first
 run.
 
-The container runs the (optional) link checks before polling Telegram.
-Configure `CHECK_YOUTUBE_URL` / `CHECK_TIKTOK_URL` to enable them; unset checks
-are skipped. With `STARTUP_CHECKS_REQUIRED=1`, hard check failures still stop
-startup, while known unsupported content and flaky provider responses are
-reported as warnings.
+## Startup checks
+
+Before it starts polling Telegram, the container downloads a test video for
+each configured platform and throws it away. This runs the same code path a
+real request does — format selection, yt-dlp, ffmpeg merge, the TikTok
+audio-track check, the size limit — so a broken extractor, expired cookies or a
+missing ffmpeg surfaces at deploy time instead of on someone's first link:
+
+```text
+OK youtube: Clip by Author (28s, 4.2 MB)
+OK tiktok: Cat by user (14s, 2.1 MB)
+```
+
+Point `CHECK_YOUTUBE_URL` and `CHECK_TIKTOK_URL` at stable short vertical
+videos. Unset checks are skipped, so leaving both empty disables startup
+checking. Pick videos unlikely to be deleted or geo-blocked — a dead fixture
+fails every restart.
+
+- `STARTUP_CHECK_DOWNLOAD=0` falls back to metadata-only checks (~2s instead of
+  ~10-20s), which verifies the extractor and cookies but never the download.
+- `STARTUP_CHECKS_REQUIRED=1` makes a hard failure stop startup. Two things are
+  always warnings rather than blockers: a fixture that is simply wrong for this
+  bot (photo post, video too long), and flaky provider responses such as a
+  TikTok 403. A file that downloads but exceeds `MAX_FILE_SIZE_MB` *does* block
+  — that means the format selector picked something Telegram cannot accept.
 
 Telegram commands:
 

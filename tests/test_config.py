@@ -4,9 +4,11 @@ from __future__ import annotations
 
 import io
 import os
+import tempfile
 import unittest
 from contextlib import redirect_stdout
 from datetime import time
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -222,6 +224,18 @@ class StartupCheckTest(unittest.TestCase):
         self.assertFalse(result.blocks_startup)
         self.assertEqual(result_exit_code([result]), 0)
 
+    def test_a_too_long_fixture_is_a_warning_not_a_failure(self) -> None:
+        # Плохая ссылка в CHECK_* — проблема настройки проверки, а не бота.
+        from downloader.download import VideoTooLongError
+
+        with patch(
+            "downloader.download.fetch_info", side_effect=VideoTooLongError("Слишком длинное")
+        ):
+            result = run_check(LinkCheck("youtube", "https://youtu.be/abc123"))
+
+        self.assertFalse(result.ok)
+        self.assertFalse(result.blocks_startup)
+
     def test_tiktok_forbidden_is_a_warning(self) -> None:
         from downloader.download import DownloadError
 
@@ -247,13 +261,87 @@ class StartupCheckTest(unittest.TestCase):
         self.assertTrue(result.blocks_startup)
         self.assertEqual(result_exit_code([result]), 1)
 
-    def test_successful_check_reports_the_video(self) -> None:
+    def test_metadata_only_check_reports_the_video(self) -> None:
         info = SimpleNamespace(title="Clip", uploader="Author", duration=30)
-        with patch("downloader.download.fetch_info", return_value=info):
-            result = run_check(LinkCheck("youtube", "https://youtu.be/abc123"))
+        with patch("downloader.config.STARTUP_CHECK_DOWNLOAD", False):
+            with patch("downloader.download.fetch_info", return_value=info):
+                result = run_check(LinkCheck("youtube", "https://youtu.be/abc123"))
 
         self.assertTrue(result.ok)
         self.assertEqual(result.message, "Clip by Author (30s)")
+
+
+class DownloadCheckTest(unittest.TestCase):
+    """С STARTUP_CHECK_DOWNLOAD проверка качает тестовое видео целиком."""
+
+    info = SimpleNamespace(title="Clip", uploader="Author", duration=30)
+
+    def run_check_with_download(self, **download_kwargs):
+        with patch("downloader.config.STARTUP_CHECK_DOWNLOAD", True):
+            with patch("downloader.download.fetch_info", return_value=self.info):
+                with patch("downloader.config.download_test_video", **download_kwargs):
+                    return run_check(LinkCheck("youtube", "https://youtu.be/abc123"))
+
+    def test_downloaded_size_is_reported(self) -> None:
+        result = self.run_check_with_download(return_value=4.25)
+
+        self.assertTrue(result.ok)
+        self.assertEqual(result.message, "Clip by Author (30s, 4.2 MB)")
+
+    def test_oversized_result_blocks_startup(self) -> None:
+        # Формат-селектор выбрал то, что Telegram не примет — это поломка бота.
+        from downloader.download import FileTooLargeError
+
+        result = self.run_check_with_download(side_effect=FileTooLargeError("Файл слишком большой"))
+
+        self.assertFalse(result.ok)
+        self.assertTrue(result.blocks_startup)
+        self.assertEqual(result_exit_code([result]), 1)
+
+    def test_broken_download_blocks_startup(self) -> None:
+        from downloader.download import DownloadError
+
+        result = self.run_check_with_download(side_effect=DownloadError("Не удалось найти файл."))
+
+        self.assertFalse(result.ok)
+        self.assertTrue(result.blocks_startup)
+
+    def test_transient_download_failure_is_only_a_warning(self) -> None:
+        from downloader.download import DownloadError
+
+        result = self.run_check_with_download(side_effect=DownloadError("Connection reset by peer"))
+
+        self.assertFalse(result.ok)
+        self.assertFalse(result.blocks_startup)
+
+    def test_test_video_is_deleted_afterwards(self) -> None:
+        from downloader.config import download_test_video
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "clip.mp4")
+            Path(path).write_bytes(b"x" * (2 * 1024 * 1024))
+            result = SimpleNamespace(file_path=path, info=self.info)
+
+            with patch("downloader.download.download_video", return_value=result):
+                size_mb = download_test_video("https://youtu.be/abc123")
+
+            self.assertAlmostEqual(size_mb, 2.0, places=2)
+            self.assertFalse(os.path.exists(path))
+
+    def test_file_is_deleted_even_when_measuring_fails(self) -> None:
+        from downloader.config import download_test_video
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "clip.mp4")
+            Path(path).write_bytes(b"x")
+            result = SimpleNamespace(file_path=path, info=self.info)
+
+            with patch("downloader.download.download_video", return_value=result):
+                with patch("downloader.config.os.path.getsize", side_effect=OSError("boom")):
+                    with self.assertRaises(OSError):
+                        download_test_video("https://youtu.be/abc123")
+
+            self.assertFalse(os.path.exists(path))
 
 
 class ResultPrintingTest(unittest.TestCase):
