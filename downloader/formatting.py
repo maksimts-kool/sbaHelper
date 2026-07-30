@@ -192,7 +192,7 @@ def _build_platform_block(stats: WeeklyStats) -> str:
     """
     total = sum(tally.downloads for tally in stats.platforms)
     rows = "\n".join(
-        f"{build_platform_bar(tally.downloads, total)} "
+        f"{build_platform_bar(tally.downloads, total)}  |  "
         f"{html.escape(PLATFORM_TITLES.get(tally.platform, tally.platform))} — {tally.downloads}"
         for tally in stats.platforms
     )
