@@ -192,7 +192,7 @@ class WeeklyMessageTest(unittest.TestCase):
         self.assertIn("🥉 Пётр — 2", text)
         self.assertIn("ещё 1 участник — 1", text)
         self.assertIn("<blockquote>", text)
-        self.assertIn("▓▓▓▓▓░░░░░ TikTok — 5", text)
+        self.assertIn("▓▓▓▓▓░░░░░  |  TikTok — 5", text)
         self.assertIn("«Кот открывает холодильник» — 2.4M 👁", text)
 
     def test_hit_of_the_week_is_omitted_without_view_counts(self) -> None:

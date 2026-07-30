@@ -128,8 +128,8 @@ downloads, and groups with no downloads that week get no message:
    ещё 3 участника — 4
 
 📱 Откуда
-▏▓▓▓▓▓▓▓░░░ TikTok — 33
-▏▓▓▓░░░░░░░ YouTube — 14
+▏▓▓▓▓▓▓▓░░░  |  TikTok — 33
+▏▓▓▓░░░░░░░  |  YouTube — 14
 
 🔥 Хит недели
 «Кот открывает холодильник» — 2.4M 👁
