@@ -1,5 +1,6 @@
 """Журнал загрузок и недельная агрегация — `downloader/stats.py`."""
 
+import sqlite3
 import tempfile
 import unittest
 from datetime import datetime, timedelta, timezone
@@ -32,8 +33,19 @@ def row(
     title: str = "Видео",
     uploader: str = "author",
     view_count: int | None = None,
+    username: str | None = None,
 ) -> tuple:
-    return (user_id, user_name, platform, duration_sec, size_bytes, title, uploader, view_count)
+    return (
+        user_id,
+        user_name,
+        username,
+        platform,
+        duration_sec,
+        size_bytes,
+        title,
+        uploader,
+        view_count,
+    )
 
 
 class WeekPeriodTests(unittest.TestCase):
@@ -172,6 +184,7 @@ class StatsStoreTests(unittest.TestCase):
             chat_id=chat_id,
             user_id=user_id,
             user_name=name,
+            username=kwargs.pop("username", None),
             platform="tiktok",
             **kwargs,
         )
@@ -217,6 +230,41 @@ class StatsStoreTests(unittest.TestCase):
         self.record(-100, 1, "A", datetime(2026, 7, 21, 12))
         stats = self.store.weekly_stats(chat_id=-100, start=self.start, end=self.end)
         self.assertEqual(stats.total_downloads, 1)
+
+    def test_username_survives_a_round_trip(self):
+        self.record(-100, 1, "Максим", datetime(2026, 7, 21, 12, tzinfo=UTC), username="maksim")
+
+        stats = self.store.weekly_stats(chat_id=-100, start=self.start, end=self.end)
+
+        self.assertEqual(stats.top_users[0].username, "maksim")
+
+    def test_username_column_is_added_to_an_older_database(self):
+        legacy_path = str(Path(self._tempdir.name) / "legacy.db")
+        # `sqlite3.connect` как контекст-менеджер только коммитит; на Windows
+        # незакрытый файл потом не даёт убрать временный каталог.
+        conn = sqlite3.connect(legacy_path)
+        with conn:
+            conn.execute(
+                "CREATE TABLE downloads (id INTEGER PRIMARY KEY AUTOINCREMENT, "
+                "created_at TEXT NOT NULL, chat_id INTEGER NOT NULL, user_id INTEGER NOT NULL, "
+                "user_name TEXT NOT NULL, platform TEXT NOT NULL, duration_sec INTEGER NOT NULL, "
+                "size_bytes INTEGER NOT NULL, title TEXT NOT NULL, uploader TEXT NOT NULL, "
+                "view_count INTEGER)"
+            )
+            conn.execute(
+                "INSERT INTO downloads (created_at, chat_id, user_id, user_name, platform, "
+                "duration_sec, size_bytes, title, uploader, view_count) VALUES "
+                "('2026-07-21T12:00:00+00:00', -100, 1, 'Максим', 'tiktok', 60, 1024, 'В', 'a', 5)"
+            )
+        conn.close()
+
+        legacy = StatsStore(legacy_path)
+        stats = legacy.weekly_stats(chat_id=-100, start=self.start, end=self.end)
+
+        # Старая строка читается, просто без упоминания.
+        self.assertEqual(stats.total_downloads, 1)
+        self.assertEqual(stats.top_users[0].name, "Максим")
+        self.assertIsNone(stats.top_users[0].username)
 
     def test_prune_removes_only_old_rows(self):
         self.record(-100, 1, "A", datetime(2026, 1, 1, tzinfo=UTC))

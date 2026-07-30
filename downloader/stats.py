@@ -44,6 +44,7 @@ CREATE TABLE IF NOT EXISTS downloads (
     chat_id      INTEGER NOT NULL,
     user_id      INTEGER NOT NULL,
     user_name    TEXT    NOT NULL,
+    username     TEXT,
     platform     TEXT    NOT NULL,
     duration_sec INTEGER NOT NULL,
     size_bytes   INTEGER NOT NULL,
@@ -66,6 +67,8 @@ class DownloadEvent:
     chat_id: int
     user_id: int
     user_name: str
+    # `@username`, если он у человека есть — из него собирается упоминание в сводке.
+    username: str | None
     platform: str
     duration_sec: int = 0
     size_bytes: int = 0
@@ -78,6 +81,8 @@ class DownloadEvent:
 class UserTally:
     name: str
     downloads: int
+    # Есть — показываем упоминанием, и подпись подтянется из аккаунта сама.
+    username: str | None = None
 
 
 @dataclass(frozen=True)
@@ -178,17 +183,31 @@ def aggregate_weekly_stats(
 ) -> WeeklyStats:
     """Собирает сводку из строк вида, который отдаёт `StatsStore.weekly_stats`."""
     user_names: dict[int, str] = {}
+    user_usernames: dict[int, str | None] = {}
     user_counts: Counter[int] = Counter()
     platform_counts: Counter[str] = Counter()
     total_duration = 0
     total_size = 0
     top_video: TopVideo | None = None
 
-    for user_id, user_name, platform, duration_sec, size_bytes, title, uploader, views in rows:
+    for (
+        user_id,
+        user_name,
+        username,
+        platform,
+        duration_sec,
+        size_bytes,
+        title,
+        uploader,
+        views,
+    ) in rows:
         user_key = int(user_id)
         # Имя могло измениться — оставляем последнее известное. Подменяем здесь,
         # а не только при записи, чтобы старые строки тоже не выглядели пустыми.
         user_names[user_key] = display_user_name(str(user_name), user_key)
+        # У старых строк колонки ещё нет, а @username мог и появиться за неделю:
+        # запоминаем последний непустой, иначе останемся с именем.
+        user_usernames[user_key] = str(username) if username else user_usernames.get(user_key)
         user_counts[user_key] += 1
         platform_counts[str(platform)] += 1
         total_duration += int(duration_sec or 0)
@@ -207,7 +226,8 @@ def aggregate_weekly_stats(
         total_duration_sec=total_duration,
         total_size_bytes=total_size,
         top_users=tuple(
-            UserTally(user_names[user_id], count) for user_id, count in ranked[:TOP_USERS_LIMIT]
+            UserTally(user_names[user_id], count, user_usernames.get(user_id))
+            for user_id, count in ranked[:TOP_USERS_LIMIT]
         ),
         other_users=len(tail),
         other_downloads=sum(count for _, count in tail),
@@ -230,6 +250,17 @@ def empty_weekly_stats(period_start: datetime, period_end: datetime) -> WeeklySt
 # --------------------------------------------------------------------------- #
 
 
+def _add_missing_columns(conn: sqlite3.Connection) -> None:
+    """`CREATE TABLE IF NOT EXISTS` не трогает уже существующую базу — дописываем сами.
+
+    Колонка допускает NULL, поэтому у строк, записанных до неё, `@username`
+    просто остаётся пустым — в сводке такой участник останется под именем.
+    """
+    present = {row[1] for row in conn.execute("PRAGMA table_info(downloads)")}
+    if "username" not in present:
+        conn.execute("ALTER TABLE downloads ADD COLUMN username TEXT")
+
+
 class StatsStore:
     """Одна строка на успешно отправленное видео, в одном файле SQLite."""
 
@@ -240,6 +271,7 @@ class StatsStore:
             os.makedirs(parent, exist_ok=True)
         with self._connect() as conn:
             conn.executescript(_SCHEMA)
+            _add_missing_columns(conn)
 
     @contextmanager
     def _connect(self) -> Iterator[sqlite3.Connection]:
@@ -253,14 +285,15 @@ class StatsStore:
     def record(self, event: DownloadEvent, *, at: datetime | None = None) -> None:
         with self._connect() as conn:
             conn.execute(
-                "INSERT INTO downloads (created_at, chat_id, user_id, user_name, platform, "
-                "duration_sec, size_bytes, title, uploader, view_count) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "INSERT INTO downloads (created_at, chat_id, user_id, user_name, username, "
+                "platform, duration_sec, size_bytes, title, uploader, view_count) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     _utc_text(at or datetime.now(timezone.utc)),
                     event.chat_id,
                     event.user_id,
                     event.user_name,
+                    event.username,
                     event.platform,
                     event.duration_sec,
                     event.size_bytes,
@@ -283,7 +316,7 @@ class StatsStore:
     def weekly_stats(self, *, chat_id: int, start: datetime, end: datetime) -> WeeklyStats:
         with self._connect() as conn:
             rows = conn.execute(
-                "SELECT user_id, user_name, platform, duration_sec, size_bytes, "
+                "SELECT user_id, user_name, username, platform, duration_sec, size_bytes, "
                 "title, uploader, view_count FROM downloads "
                 "WHERE chat_id = ? AND created_at >= ? AND created_at < ? ORDER BY created_at",
                 (chat_id, _utc_text(start), _utc_text(end)),

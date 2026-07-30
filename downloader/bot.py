@@ -177,6 +177,7 @@ async def record_download(
         chat_id=chat_id,
         user_id=user.id if user else 0,
         user_name=user_label_for(user),
+        username=user.username if user else None,
         platform=detect_platform(url),
         duration_sec=info.duration or 0,
         size_bytes=size_bytes,

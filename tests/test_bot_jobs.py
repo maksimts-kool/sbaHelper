@@ -54,6 +54,7 @@ def record(store: StatsStore, chat_id: int, name: str, when: datetime, **kwargs)
             chat_id=chat_id,
             user_id=abs(hash(name)) % 10_000,
             user_name=name,
+            username=kwargs.pop("username", None),
             platform=kwargs.pop("platform", "tiktok"),
             **kwargs,
         ),

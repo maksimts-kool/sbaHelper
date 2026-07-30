@@ -108,9 +108,10 @@ Telegram commands:
 ## Weekly statistics
 
 Every successfully sent video is logged as one row in a SQLite file
-(`STATS_DB_PATH`, default `/data/downloader_stats.db`): timestamp, chat, user,
-platform, duration, file size, title, uploader, and view count. Nothing else is
-stored — rejected links and errors are not logged.
+(`STATS_DB_PATH`, default `/data/downloader_stats.db`): timestamp, chat, user
+(id, name and `@username` if they have one), platform, duration, file size,
+title, uploader, and view count. Nothing else is stored — rejected links and
+errors are not logged.
 
 Once a week the bot posts a per-chat summary. Each group sees only its own
 downloads, and groups with no downloads that week get no message:
@@ -121,18 +122,25 @@ downloads, and groups with no downloads that week get no message:
 Скачано: 47 видео · 1 ч 12 мин · 812 МБ
 
 🏆 Кто больше всех
-🥇 Максим — 21
+🥇 @maksim — 21
 🥈 Аня — 14
 🥉 Пётр — 8
    ещё 3 участника — 4
 
 📱 Откуда
-TikTok   ▓▓▓▓▓▓▓░░░  33
-YouTube  ▓▓▓░░░░░░░  14
+▏▓▓▓▓▓▓▓░░░ TikTok — 33
+▏▓▓▓░░░░░░░ YouTube — 14
 
 🔥 Хит недели
 «Кот открывает холодильник» — 2.4M 👁
 ```
+
+The leaderboard prefers a real `@username` mention, so the entry always reads
+the way that person is currently signed in Telegram — and pings them. Members
+without a username fall back to the name recorded at download time, with `@`
+defused so a display name cannot ping anyone. "📱 Откуда" is a quote, which is
+not monospace: the bar leads each line precisely because all bars are the same
+width and line up without padding.
 
 Defaults: Sunday at 20:00 `Europe/Tallinn`, covering that week from Monday
 00:00 up to the moment the message is sent. Downloads made after the Sunday

@@ -4,7 +4,7 @@ import html
 import re
 from datetime import datetime
 
-from downloader.stats import WeeklyStats
+from downloader.stats import UserTally, WeeklyStats
 
 INFO_EMOJI = "![ℹ️](tg://emoji?id=5231012545799666522)"
 DOWNLOAD_EMOJI = "![⬇️](tg://emoji?id=5386367538735104399)"
@@ -184,14 +184,32 @@ def build_platform_bar(count: int, total: int, width: int = PLATFORM_BAR_WIDTH) 
 
 
 def _build_platform_block(stats: WeeklyStats) -> str:
+    """Цитата: сначала полоса, потом площадка.
+
+    В цитате шрифт не моноширинный, поэтому колонки пробелами не выровнять.
+    Полоса же всегда ровно `PLATFORM_BAR_WIDTH` блоков одинаковой ширины — если
+    начинать строку с неё, левый край сходится сам.
+    """
     total = sum(tally.downloads for tally in stats.platforms)
-    name_width = max(len(PLATFORM_TITLES.get(t.platform, t.platform)) for t in stats.platforms)
     rows = "\n".join(
-        f"{PLATFORM_TITLES.get(tally.platform, tally.platform):<{name_width}}  "
-        f"{build_platform_bar(tally.downloads, total)} {tally.downloads:>3}"
+        f"{build_platform_bar(tally.downloads, total)} "
+        f"{html.escape(PLATFORM_TITLES.get(tally.platform, tally.platform))} — {tally.downloads}"
         for tally in stats.platforms
     )
-    return f"<pre>{html.escape(rows)}</pre>"
+    return f"<blockquote>{rows}</blockquote>"
+
+
+def build_user_label(tally: UserTally) -> str:
+    """Подпись участника в таблице лидеров.
+
+    Есть `@username` — отдаём его как есть: Telegram сделает из него упоминание и
+    подставит то, как человек подписан в аккаунте сейчас, а не то, как он звался
+    в момент загрузки. Без username остаётся сохранённое имя, и его, как и любой
+    другой пользовательский текст, обезвреживаем от случайных упоминаний.
+    """
+    if tally.username:
+        return f"@{html.escape(tally.username)}"
+    return html.escape(prevent_auto_links(tally.name))
 
 
 def build_weekly_stats_message(stats: WeeklyStats, *, title: str = "Итоги недели") -> str:
@@ -214,8 +232,7 @@ def build_weekly_stats_message(stats: WeeklyStats, *, title: str = "Итоги �
         lines += ["", "🏆 <b>Кто больше всех</b>"]
         for index, tally in enumerate(stats.top_users):
             medal = MEDALS[index] if index < len(MEDALS) else "•"
-            name = html.escape(prevent_auto_links(tally.name))
-            lines.append(f"{medal} {name} — {tally.downloads}")
+            lines.append(f"{medal} {build_user_label(tally)} — {tally.downloads}")
         if stats.other_users:
             people = plural_ru(stats.other_users, "участник", "участника", "участников")
             lines.append(f"   ещё {stats.other_users} {people} — {stats.other_downloads}")

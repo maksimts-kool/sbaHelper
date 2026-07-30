@@ -36,8 +36,19 @@ def stats_row(
     title: str = "Видео",
     uploader: str = "author",
     view_count: int | None = None,
+    username: str | None = None,
 ) -> tuple:
-    return (user_id, user_name, platform, duration_sec, size_bytes, title, uploader, view_count)
+    return (
+        user_id,
+        user_name,
+        username,
+        platform,
+        duration_sec,
+        size_bytes,
+        title,
+        uploader,
+        view_count,
+    )
 
 
 class CaptionTest(unittest.TestCase):
@@ -180,8 +191,8 @@ class WeeklyMessageTest(unittest.TestCase):
         self.assertIn("🥈 Аня — 3", text)
         self.assertIn("🥉 Пётр — 2", text)
         self.assertIn("ещё 1 участник — 1", text)
-        self.assertIn("<pre>", text)
-        self.assertIn("TikTok", text)
+        self.assertIn("<blockquote>", text)
+        self.assertIn("▓▓▓▓▓░░░░░ TikTok — 5", text)
         self.assertIn("«Кот открывает холодильник» — 2.4M 👁", text)
 
     def test_hit_of_the_week_is_omitted_without_view_counts(self) -> None:
@@ -208,6 +219,26 @@ class WeeklyMessageTest(unittest.TestCase):
 
         self.assertNotIn("@everyone", text)
         self.assertIn("@⁠everyone", text)
+
+    def test_username_is_shown_as_a_real_mention(self) -> None:
+        text = self.build([stats_row(1, "Максим", username="maksim")])
+
+        self.assertIn("🥇 @maksim — 1", text)
+        self.assertNotIn("Максим", text)
+
+    def test_username_wins_over_a_name_that_looks_like_a_mention(self) -> None:
+        # Подпись из аккаунта, а не то, чем человек назвался при загрузке.
+        text = self.build([stats_row(1, "@everyone", username="maksim")])
+
+        self.assertIn("@maksim", text)
+        self.assertNotIn("everyone", text)
+
+    def test_latest_known_username_is_used(self) -> None:
+        rows = [stats_row(1, "Максим"), stats_row(1, "Максим", username="maksim")]
+
+        self.assertIn("@maksim", self.build(rows))
+        # И наоборот: пропавший в последней строке username не теряется.
+        self.assertIn("@maksim", self.build(list(reversed(rows))))
 
     def test_legacy_facebook_rows_still_render(self) -> None:
         # Facebook больше не поддерживается, но старые записи должны читаться.
