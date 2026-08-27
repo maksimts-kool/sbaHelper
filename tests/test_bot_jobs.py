@@ -8,6 +8,7 @@
 from __future__ import annotations
 
 import asyncio
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
@@ -21,8 +22,16 @@ from telegram.error import TelegramError
 from telegram.ext import ApplicationBuilder
 
 from downloader.bot import (
+    MAX_DOWNLOAD_ATTEMPTS,
+    PENDING_RETRIES_KEY,
+    RETRY_MAX_OVERDUE_SEC,
     STATS_STORE_KEY,
     STATS_TZ,
+    DownloadRequest,
+    PendingRetry,
+    _fail,
+    _resume_pending_retries,
+    _retry_download_job,
     _send_weekly_stats,
     schedule_weekly_stats,
 )
@@ -207,3 +216,157 @@ def test_store_survives_a_restart(tmp_path: Path) -> None:
     run_weekly(StatsStore(path), bot)
 
     assert len(bot.sent) == 1
+
+
+# --------------------------------------------------------------------------- #
+#  Повтор неудачной загрузки                                                   #
+# --------------------------------------------------------------------------- #
+
+
+class FakeJobQueue:
+    def __init__(self) -> None:
+        self.jobs: list[SimpleNamespace] = []
+
+    def run_once(self, callback, when, *, data=None, name=None, chat_id=None, **kwargs):
+        self.jobs.append(
+            SimpleNamespace(callback=callback, when=when, data=data, name=name, chat_id=chat_id)
+        )
+
+
+class FakeStatusMessage:
+    def __init__(self) -> None:
+        self.texts: list[str] = []
+
+    async def edit_text(self, text: str, parse_mode: str | None = None) -> None:
+        self.texts.append(text)
+
+
+def make_request(attempt: int = 1) -> DownloadRequest:
+    return DownloadRequest(
+        url="https://www.tiktok.com/@user/video/1",
+        chat_id=-100,
+        chat_type="supergroup",
+        chat_label="chat (id=-100)",
+        user_label="Максим (id=1)",
+        user=None,
+        reply_to_message_id=7,
+        status_message_id=8,
+        attempt=attempt,
+    )
+
+
+def run_fail(request: DownloadRequest, *, delay: int = 120, chat_data: dict | None = None):
+    queue = FakeJobQueue()
+    status = FakeStatusMessage()
+    context = SimpleNamespace(job_queue=queue, chat_data={} if chat_data is None else chat_data)
+
+    with patch("downloader.bot.RETRY_DELAY_SEC", delay):
+        asyncio.run(_fail(context, request, status, "ошибка загрузки"))
+
+    return queue, status, context.chat_data
+
+
+def test_first_failure_schedules_one_retry() -> None:
+    queue, status, chat_data = run_fail(make_request())
+
+    assert len(queue.jobs) == 1
+    job = queue.jobs[0]
+    assert job.when == 120
+    assert job.chat_id == -100
+    assert job.data.attempt == 2
+    assert job.data.url == make_request().url
+    assert "Попробую ещё раз" in status.texts[0]
+
+    pending = chat_data[PENDING_RETRIES_KEY]
+    assert list(pending) == [7]
+    assert pending[7].request.attempt == 2
+
+
+def test_second_failure_is_forgotten() -> None:
+    queue, status, chat_data = run_fail(make_request(attempt=MAX_DOWNLOAD_ATTEMPTS))
+
+    assert queue.jobs == []
+    assert chat_data.get(PENDING_RETRIES_KEY, {}) == {}
+    assert status.texts[0] == "ошибка загрузки"
+
+
+def test_zero_delay_disables_retries() -> None:
+    queue, status, chat_data = run_fail(make_request(), delay=0)
+
+    assert queue.jobs == []
+    assert chat_data.get(PENDING_RETRIES_KEY, {}) == {}
+    assert status.texts[0] == "ошибка загрузки"
+
+
+def test_missing_job_queue_does_not_break_the_error_message() -> None:
+    status = FakeStatusMessage()
+    context = SimpleNamespace(job_queue=None, chat_data={})
+
+    with patch("downloader.bot.RETRY_DELAY_SEC", 120):
+        asyncio.run(_fail(context, make_request(), status, "ошибка загрузки"))
+
+    assert status.texts[0] == "ошибка загрузки"
+
+
+def test_retry_job_reruns_the_request_and_clears_it_from_chat_data() -> None:
+    request = make_request(attempt=2)
+    chat_data = {PENDING_RETRIES_KEY: {7: PendingRetry(request=request, run_at=0.0)}}
+    context = SimpleNamespace(
+        job=SimpleNamespace(data=request),
+        chat_data=chat_data,
+        bot=FakeBot(),
+    )
+    seen = []
+
+    async def fake_process(ctx, req, msg):
+        seen.append((req, msg.message_id, msg.chat_id))
+
+    with patch("downloader.bot._process_download", fake_process):
+        asyncio.run(_retry_download_job(context))
+
+    assert seen == [(request, 8, -100)]
+    assert chat_data[PENDING_RETRIES_KEY] == {}
+
+
+# --------------------------------------------------------------------------- #
+#  Повторы переживают перезапуск                                               #
+# --------------------------------------------------------------------------- #
+
+
+def resume(pending: dict) -> tuple[FakeJobQueue, dict]:
+    chat_data = {PENDING_RETRIES_KEY: pending}
+    app = SimpleNamespace(job_queue=FakeJobQueue(), chat_data={-100: chat_data})
+
+    asyncio.run(_resume_pending_retries(app))
+
+    return app.job_queue, pending
+
+
+def test_pending_retry_is_rearmed_after_a_restart() -> None:
+    request = make_request(attempt=2)
+    run_at = time.time() + 90
+    queue, pending = resume({7: PendingRetry(request=request, run_at=run_at)})
+
+    assert len(queue.jobs) == 1
+    job = queue.jobs[0]
+    assert job.data == request
+    assert job.chat_id == -100
+    assert 80 <= job.when <= 90
+    assert list(pending) == [7]
+
+
+def test_overdue_retry_runs_immediately() -> None:
+    request = make_request(attempt=2)
+    queue, _ = resume({7: PendingRetry(request=request, run_at=time.time() - 30)})
+
+    assert len(queue.jobs) == 1
+    assert queue.jobs[0].when == 0.0
+
+
+def test_stale_retry_is_dropped() -> None:
+    request = make_request(attempt=2)
+    run_at = time.time() - RETRY_MAX_OVERDUE_SEC - 60
+    queue, pending = resume({7: PendingRetry(request=request, run_at=run_at)})
+
+    assert queue.jobs == []
+    assert pending == {}

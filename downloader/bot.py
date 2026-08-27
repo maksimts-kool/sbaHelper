@@ -9,11 +9,14 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import pickle
 import sqlite3
 import threading
-from datetime import datetime, timedelta
+import time
+from dataclasses import dataclass, replace
+from datetime import datetime, timedelta, timezone
 
-from telegram import BotCommand, Message, Update
+from telegram import BotCommand, Chat, Message, Update
 from telegram.constants import ChatAction
 from telegram.error import TelegramError
 from telegram.ext import (
@@ -21,15 +24,19 @@ from telegram.ext import (
     CommandHandler,
     ContextTypes,
     MessageHandler,
+    PersistenceInput,
+    PicklePersistence,
     filters,
 )
 from telegram.request import HTTPXRequest
 
 from downloader.config import (
     ALLOWED_CHAT_IDS,
+    BOT_STATE_PATH,
     DOWNLOADER_BOT_TOKEN,
     MAX_FILE_SIZE_MB,
     MAX_SHORT_DURATION_SEC,
+    RETRY_DELAY_SEC,
     STARTUP_CHECKS_REQUIRED,
     STATS_DB_PATH,
     STATS_ENABLED,
@@ -86,6 +93,15 @@ logger = logging.getLogger(__name__)
 
 # Через сколько секунд удалять сообщение с ошибкой проверки ссылки.
 REJECTION_DELETE_DELAY_SEC = 5.0
+
+# Сколько раз всего бот берётся за ссылку: первая попытка и один повтор.
+MAX_DOWNLOAD_ATTEMPTS = 2
+
+# Ключ в chat_data, под которым лежат отложенные повторы.
+PENDING_RETRIES_KEY = "pending_retries"
+
+# После перезапуска не поднимаем повторы, просроченные больше чем на час.
+RETRY_MAX_OVERDUE_SEC = 3600
 
 STATS_STORE_KEY = "stats_store"
 STATS_TZ = resolve_timezone(STATS_TIMEZONE)
@@ -341,6 +357,185 @@ def _reject_with_transient_error(
     context.application.create_task(_show_then_delete(status_msg, text, bot=context.bot))
 
 
+# --------------------------------------------------------------------------- #
+#  Повтор неудачной загрузки                                                   #
+# --------------------------------------------------------------------------- #
+
+
+@dataclass(frozen=True)
+class DownloadRequest:
+    """Данные для повтора: у отложенной джобы исходного апдейта уже нет.
+
+    Внутри только примитивы и `telegram.User`, поэтому запрос спокойно
+    переживает pickle-персистентность вместе с `chat_data`.
+    """
+
+    url: str
+    chat_id: int
+    chat_type: str
+    chat_label: str
+    user_label: str
+    user: object | None
+    reply_to_message_id: int
+    status_message_id: int
+    attempt: int = 1
+
+
+@dataclass(frozen=True)
+class PendingRetry:
+    """Запланированный повтор в `chat_data`.
+
+    PTB сохраняет только `*_data`, но не сами джобы, поэтому очередь повторов
+    держим в `chat_data` и пересобираем джобы на старте.
+    """
+
+    request: DownloadRequest
+    run_at: float
+
+
+def _pending_retries(chat_data) -> dict:
+    if chat_data is None:
+        return {}
+    return chat_data.setdefault(PENDING_RETRIES_KEY, {})
+
+
+def _format_retry_delay() -> str:
+    if RETRY_DELAY_SEC >= 60:
+        return f"{round(RETRY_DELAY_SEC / 60)} мин"
+    return f"{RETRY_DELAY_SEC} сек"
+
+
+def _retry_scheduled_notice() -> str:
+    return escape_md_v2(f"🔁 Попробую ещё раз через {_format_retry_delay()}.")
+
+
+def _retry_started_notice(attempt: int) -> str:
+    return escape_md_v2(f"🔁 Повторная попытка {attempt} из {MAX_DOWNLOAD_ATTEMPTS}...")
+
+
+def _status_message(bot, request: DownloadRequest) -> Message:
+    """Ручка для правки статусного сообщения.
+
+    После перезапуска исходного объекта уже нет, а Telegram для правки и
+    удаления хватает пары chat_id + message_id — собираем ручку сами.
+    """
+    message = Message(
+        message_id=request.status_message_id,
+        date=datetime.now(timezone.utc),
+        chat=Chat(id=request.chat_id, type=request.chat_type),
+    )
+    message.set_bot(bot)
+    return message
+
+
+def _arm_retry_job(job_queue, request: DownloadRequest, delay: float) -> None:
+    job_queue.run_once(
+        _retry_download_job,
+        delay,
+        data=request,
+        chat_id=request.chat_id,
+        name=f"retry:{request.chat_id}:{request.reply_to_message_id}",
+    )
+
+
+def _schedule_retry(context: ContextTypes.DEFAULT_TYPE, request: DownloadRequest) -> bool:
+    """Ставит ровно один отложенный повтор.
+
+    Повторяем только один раз: если ссылка не открылась и со второй попытки,
+    дело не во временном сбое — бот забывает её, а не долбит TikTok по кругу.
+    """
+    if RETRY_DELAY_SEC <= 0 or request.attempt >= MAX_DOWNLOAD_ATTEMPTS:
+        return False
+
+    job_queue = getattr(context, "job_queue", None)
+    if job_queue is None:
+        logger.warning("[%s] No job queue, skipping retry for %s", request.chat_label, request.url)
+        return False
+
+    retry = replace(request, attempt=request.attempt + 1)
+    _pending_retries(context.chat_data)[request.reply_to_message_id] = PendingRetry(
+        request=retry,
+        run_at=time.time() + RETRY_DELAY_SEC,
+    )
+    _arm_retry_job(job_queue, retry, RETRY_DELAY_SEC)
+    logger.info(
+        "[%s] Scheduled retry %d/%d in %ds: %s",
+        request.chat_label,
+        retry.attempt,
+        MAX_DOWNLOAD_ATTEMPTS,
+        RETRY_DELAY_SEC,
+        request.url,
+    )
+    return True
+
+
+async def _retry_download_job(context: ContextTypes.DEFAULT_TYPE) -> None:
+    request: DownloadRequest = context.job.data
+    # Снимаем с учёта сразу: этот повтор либо доедет, либо будет забыт.
+    _pending_retries(context.chat_data).pop(request.reply_to_message_id, None)
+    await _process_download(context, request, _status_message(context.bot, request))
+
+
+async def _resume_pending_retries(app) -> None:
+    """Возвращает в очередь повторы, пережившие перезапуск.
+
+    Джобы PTB живут в памяти, поэтому после рестарта их надо пересобрать из
+    `chat_data`. Слишком просроченные выбрасываем: видео из позавчерашнего
+    сообщения уже никому не нужно.
+    """
+    job_queue = getattr(app, "job_queue", None)
+    if job_queue is None:
+        return
+
+    now = time.time()
+    resumed = 0
+    dropped = 0
+
+    for chat_data in app.chat_data.values():
+        pending = chat_data.get(PENDING_RETRIES_KEY)
+        if not pending:
+            continue
+
+        for key, entry in list(pending.items()):
+            delay = entry.run_at - now
+            if delay < -RETRY_MAX_OVERDUE_SEC:
+                del pending[key]
+                dropped += 1
+                logger.info("Dropped stale retry for %s", entry.request.url)
+                continue
+
+            _arm_retry_job(job_queue, entry.request, max(delay, 0.0))
+            resumed += 1
+            logger.info(
+                "[%s] Resumed retry in %ds: %s",
+                entry.request.chat_label,
+                round(max(delay, 0.0)),
+                entry.request.url,
+            )
+
+    if resumed or dropped:
+        logger.info("Pending retries after restart: %d resumed, %d dropped", resumed, dropped)
+
+
+async def _fail(
+    context: ContextTypes.DEFAULT_TYPE,
+    request: DownloadRequest,
+    status_msg: Message,
+    text: str,
+) -> None:
+    """Показывает ошибку и, если попытка ещё осталась, планирует повтор."""
+    if _schedule_retry(context, request):
+        text = f"{text}\n\n{_retry_scheduled_notice()}"
+    else:
+        logger.info(
+            "[%s] Giving up on %s after %d attempt(s)",
+            request.chat_label,
+            request.url,
+            request.attempt,
+        )
+    await _safe_edit(status_msg, text)
+
+
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """
     Реагирует на любое текстовое сообщение / подпись к медиа.
@@ -385,6 +580,37 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         parse_mode="MarkdownV2",
     )
 
+    request = DownloadRequest(
+        url=url,
+        chat_id=chat_id,
+        chat_type=chat.type,
+        chat_label=chat_label,
+        user_label=user_label,
+        user=user,
+        reply_to_message_id=message.message_id,
+        status_message_id=status_msg.message_id,
+    )
+    await _process_download(context, request, status_msg)
+
+
+async def _process_download(
+    context: ContextTypes.DEFAULT_TYPE,
+    request: DownloadRequest,
+    status_msg: Message,
+) -> None:
+    """Скачивает видео по ссылке и отправляет его в чат.
+
+    Вынесено из `handle_message`, чтобы отложенный повтор мог прогнать тот же
+    путь без исходного апдейта — у джобы есть только `DownloadRequest`.
+    """
+    url = request.url
+    chat_id = request.chat_id
+    chat_label = request.chat_label
+    user_label = request.user_label
+
+    if request.attempt > 1:
+        await _safe_edit(status_msg, _retry_started_notice(request.attempt))
+
     loop = asyncio.get_running_loop()
 
     try:
@@ -398,7 +624,9 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         return
     except DownloadError as e:
         short_err = str(e)[:200]
-        await _safe_edit(
+        await _fail(
+            context,
+            request,
             status_msg,
             f"❌ Не удалось получить информацию:\n`{escape_md_v2(short_err)}`",
         )
@@ -406,7 +634,12 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     except Exception as e:
         capture_exception(e)
         logger.exception("Unexpected error in fetch_info")
-        await _safe_edit(status_msg, "❌ Неизвестная ошибка при получении информации\\.")
+        await _fail(
+            context,
+            request,
+            status_msg,
+            "❌ Неизвестная ошибка при получении информации\\.",
+        )
         return
 
     # --- 2. Ссылка прошла проверку — получаем информацию о видео ---
@@ -476,12 +709,22 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     except DownloadError as e:
         logger.error("[%s] Download failed for %s: %s", chat_label, url, e)
         short_err = str(e)[:200]
-        await _safe_edit(status_msg, f"❌ Ошибка загрузки:\n`{escape_md_v2(short_err)}`")
+        await _fail(
+            context,
+            request,
+            status_msg,
+            f"❌ Ошибка загрузки:\n`{escape_md_v2(short_err)}`",
+        )
         return
     except Exception as e:
         logger.exception("[%s] Unexpected error in download_video for %s", chat_label, url)
         capture_exception(e)
-        await _safe_edit(status_msg, "❌ Неизвестная ошибка при скачивании\\.")
+        await _fail(
+            context,
+            request,
+            status_msg,
+            "❌ Неизвестная ошибка при скачивании\\.",
+        )
         return
 
     logger.info("[%s] Download complete: %s", chat_label, result.file_path)
@@ -525,11 +768,16 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
                 caption=caption,
                 parse_mode="HTML",
                 supports_streaming=True,
-                reply_to_message_id=message.message_id,
+                reply_to_message_id=request.reply_to_message_id,
             )
     except TelegramError as e:
         logger.error("[%s] Failed to send video: %s", chat_label, e)
-        await _safe_edit(status_msg, f"❌ Не удалось отправить видео: {escape_md_v2(str(e))}")
+        await _fail(
+            context,
+            request,
+            status_msg,
+            f"❌ Не удалось отправить видео: {escape_md_v2(str(e))}",
+        )
     else:
         sent_successfully = True
         logger.info("[%s] Video sent successfully to %s", chat_label, user_label)
@@ -543,7 +791,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     await record_download(
         context,
         chat_id=chat_id,
-        user=user,
+        user=request.user,
         url=url,
         info=result.info,
         size_bytes=file_size_bytes,
@@ -604,6 +852,7 @@ async def _post_init(app) -> None:
             BotCommand("stats", "Статистика за текущую неделю"),
         ]
     )
+    await _resume_pending_retries(app)
     me = await app.bot.get_me()
     logger.info("Downloader bot started: @%s (id=%s)", me.username, me.id)
     if ALLOWED_CHAT_IDS:
@@ -622,6 +871,63 @@ async def _error_handler(update: object, context) -> None:
         exc_info = (type(context.error), context.error, context.error.__traceback__)
         capture_exception(context.error)
     logger.error("Unhandled downloader bot error", exc_info=exc_info)
+
+
+def _discard_unreadable_state() -> None:
+    """Битый pickle уводим в сторону, иначе бот не поднимется вообще.
+
+    Потерять очередь повторов не страшно, а бесконечный рестарт контейнера —
+    страшно, поэтому проверяем файл до того, как его откроет PTB.
+    """
+    if not os.path.exists(BOT_STATE_PATH):
+        return
+
+    try:
+        with open(BOT_STATE_PATH, "rb") as state_file:
+            pickle.load(state_file)
+    except Exception as e:
+        broken_path = f"{BOT_STATE_PATH}.broken"
+        capture_exception(e)
+        logger.error(
+            "State file %s is unreadable (%s), moving it to %s", BOT_STATE_PATH, e, broken_path
+        )
+        try:
+            os.replace(BOT_STATE_PATH, broken_path)
+        except OSError as move_error:
+            logger.error("Could not move the broken state file aside: %s", move_error)
+
+
+def build_persistence() -> PicklePersistence | None:
+    """Персистентность PTB — только ради отложенных повторов.
+
+    `bot_data` намеренно не сохраняем: там живёт `StatsStore` с открытым
+    соединением SQLite, который не переживёт pickle.
+    """
+    if not BOT_STATE_PATH:
+        logger.info("Bot state persistence is disabled (BOT_STATE_PATH is empty).")
+        return None
+
+    state_dir = os.path.dirname(BOT_STATE_PATH)
+    try:
+        if state_dir:
+            os.makedirs(state_dir, exist_ok=True)
+    except OSError as e:
+        capture_exception(e)
+        logger.error("Could not create the state directory %s: %s", state_dir, e)
+        return None
+
+    _discard_unreadable_state()
+    logger.info("Pending retries are persisted in %s", BOT_STATE_PATH)
+    return PicklePersistence(
+        filepath=BOT_STATE_PATH,
+        store_data=PersistenceInput(
+            bot_data=False,
+            chat_data=True,
+            user_data=False,
+            callback_data=False,
+        ),
+        update_interval=30,
+    )
 
 
 def run_bot() -> int:
@@ -648,14 +954,19 @@ def run_bot() -> int:
         pool_timeout=20.0,
     )
 
-    application = (
+    builder = (
         ApplicationBuilder()
         .token(DOWNLOADER_BOT_TOKEN)
         .request(request)
         .get_updates_request(polling_request)
         .post_init(_post_init)
-        .build()
     )
+
+    persistence = build_persistence()
+    if persistence is not None:
+        builder = builder.persistence(persistence)
+
+    application = builder.build()
 
     application.bot_data[STATS_STORE_KEY] = open_stats_store()
     schedule_weekly_stats(application)

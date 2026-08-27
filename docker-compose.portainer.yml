@@ -36,6 +36,11 @@ services:
       STARTUP_CHECK_DOWNLOAD: "${STARTUP_CHECK_DOWNLOAD:-1}"
       STARTUP_CHECKS_REQUIRED: "${STARTUP_CHECKS_REQUIRED:-1}"
 
+      # Повтор упавшей загрузки: одна попытка через N секунд, 0 — выключить.
+      RETRY_DELAY_SEC: "${RETRY_DELAY_SEC:-120}"
+      # Файл состояния PTB: в нём отложенный повтор переживает перезапуск.
+      BOT_STATE_PATH: "${BOT_STATE_PATH:-/data/downloader_state.pickle}"
+
       STATS_ENABLED: "${STATS_ENABLED:-1}"
       STATS_DB_PATH: "${STATS_DB_PATH:-/data/downloader_stats.db}"
       STATS_TIMEZONE: "${STATS_TIMEZONE:-Europe/Tallinn}"

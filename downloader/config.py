@@ -101,6 +101,16 @@ STATS_WEEKLY_WEEKDAY = min(6, max(0, env_int("STATS_WEEKLY_WEEKDAY", 6)))
 STATS_WEEKLY_AT = env_clock_time("STATS_WEEKLY_TIME", time(hour=20))
 STATS_RETENTION_DAYS = max(0, env_int("STATS_RETENTION_DAYS", 400))
 
+# Повтор неудачной загрузки: после ошибки бот ждёт RETRY_DELAY_SEC и пробует
+# ещё один раз. Если и вторая попытка падает — ссылка забывается, дальше бот
+# её не трогает. 0 полностью отключает повторы.
+RETRY_DELAY_SEC = max(0, env_int("RETRY_DELAY_SEC", 120))
+
+# Файл состояния python-telegram-bot: в нём отложенные повторы переживают
+# перезапуск контейнера. Пустое значение отключает персистентность — тогда
+# запланированный повтор теряется вместе с процессом.
+BOT_STATE_PATH = os.getenv("BOT_STATE_PATH", "/data/downloader_state.pickle").strip()
+
 SENTRY_DSN = os.getenv("SENTRY_DSN", "").strip()
 SENTRY_ENVIRONMENT = os.getenv("SENTRY_ENVIRONMENT", "production").strip()
 SENTRY_RELEASE = os.getenv("SENTRY_RELEASE", "").strip()

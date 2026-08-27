@@ -49,6 +49,10 @@ The example surfaces the values a deployment usually tunes:
 
 - `DOWNLOADER_BOT_TOKEN` — the bot token (required).
 - `MAX_FILE_SIZE_MB`, `MAX_SHORT_DURATION_SEC` — limits.
+- `RETRY_DELAY_SEC` — how long to wait before the single retry of a failed
+  download (`0` disables retries).
+- `BOT_STATE_PATH` — pickle file on the `/data` volume where a pending retry
+  waits out a restart (empty disables persistence).
 - `STATS_WEEKLY_WEEKDAY`, `STATS_WEEKLY_TIME`, `STATS_TIMEZONE` — when the
   weekly summary is posted.
 - `ALLOWED_CHAT_IDS`, `COOKIES_FILE`, `YOUTUBE_COOKIES_FILE`, `SENTRY_DSN` —
