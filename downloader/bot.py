@@ -60,6 +60,7 @@ from downloader.download import (
     cleanup,
     download_video,
     fetch_info,
+    log_impersonation_status,
 )
 from downloader.formatting import (
     INFO_EMOJI,
@@ -674,6 +675,8 @@ def run_bot() -> int:
 def run_startup_then_bot() -> int:
     configure_startup_logging()
     init_error_tracking("downloader-startup")
+
+    log_impersonation_status()
 
     logger.info("Running startup link checks.")
     results = run_checks()

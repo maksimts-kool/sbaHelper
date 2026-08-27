@@ -1,4 +1,7 @@
 python-telegram-bot[job-queue]>=22.8
 python-dotenv>=1.2.2
 sentry-sdk>=2.64.0
-yt-dlp>=2026.6.9
+# curl-cffi обязателен: экстрактор TikTok запрашивает страницу с имперсонацией
+# браузера. Без неё TikTok отдаёт бот-заглушку, и yt-dlp падает с
+# «Unexpected response from webpage request».
+yt-dlp[default,curl-cffi]>=2026.8.19

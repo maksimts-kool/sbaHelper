@@ -66,6 +66,33 @@ YTDLP_RETRY_ATTEMPTS = 3
 YTDLP_RETRY_MAX_SLEEP_SEC = 8.0
 
 
+def impersonation_available() -> bool:
+    """Доступна ли yt-dlp имперсонация браузера (бэкенд curl_cffi).
+
+    Экстрактор TikTok запрашивает страницу видео с impersonate=True. Без
+    бэкенда yt-dlp молча уходит на обычный запрос, TikTok отдаёт бот-заглушку
+    вместо данных, и извлечение падает с «Unexpected response from webpage
+    request». Проверяем на старте, чтобы это было видно сразу.
+    """
+    try:
+        with yt_dlp.YoutubeDL({"quiet": True, "no_warnings": True, "ignoreconfig": True}) as ydl:
+            return bool(ydl._get_available_impersonate_targets())
+    except Exception:  # приватный API yt-dlp: не роняем старт из-за него
+        logger.debug("Could not probe yt-dlp impersonate targets.", exc_info=True)
+        return True
+
+
+def log_impersonation_status() -> bool:
+    available = impersonation_available()
+    if not available:
+        logger.error(
+            "yt-dlp has no browser impersonation backend (curl_cffi is missing). "
+            "TikTok downloads will fail with 'Unexpected response from webpage request'. "
+            "Install it: pip install 'yt-dlp[default,curl-cffi]'"
+        )
+    return available
+
+
 def get_cookie_file_for_url(url: str) -> str:
     if is_youtube_url(url):
         return YOUTUBE_COOKIES_FILE
