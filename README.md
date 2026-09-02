@@ -109,6 +109,34 @@ Telegram commands:
 - `/start` — what the bot does and which links it accepts
 - `/stats` — this week's summary so far, for the current chat
 
+## TikTok and browser impersonation
+
+TikTok serves its video pages only to requests whose TLS/HTTP fingerprint looks
+like a real browser, so yt-dlp needs the `curl-cffi` backend (already in
+`requirements.txt`). Without it every TikTok link fails with
+`Unexpected response from webpage request`, and the startup log says so
+explicitly.
+
+The backend alone is not enough: the TikTok extractor asks yt-dlp for *any*
+impersonation target, and yt-dlp then picks the newest one `curl_cffi` offers.
+TikTok's WAF blocks exactly that newest fingerprint and answers with a ~500-byte
+"Site Maintenance" page — the same `Unexpected response from webpage request`
+error, this time with the dependency installed. Every slightly older target
+works.
+
+So `downloader/download.py` picks the target itself, from
+`IMPERSONATE_TARGETS` (newest known-good first). The startup log lists the ones
+this build supports:
+
+```text
+yt-dlp impersonation targets (in order of preference): chrome-146, chrome-145, ...
+```
+
+If a request still comes back blocked, the downloader retries it with the next
+target in the list before giving up. When TikTok eventually blocks the whole
+list, check which targets still work
+(`yt-dlp --list-impersonate-targets` plus a manual fetch) and update the tuple.
+
 ## Weekly statistics
 
 Every successfully sent video is logged as one row in a SQLite file

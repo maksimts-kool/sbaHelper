@@ -7,6 +7,7 @@
 
 from __future__ import annotations
 
+import functools
 import json
 import logging
 import os
@@ -18,6 +19,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 
 import yt_dlp
+from yt_dlp.networking.impersonate import ImpersonateTarget
 
 from downloader.config import (
     COOKIES_FILE,
@@ -65,6 +67,64 @@ class DownloadResult:
 YTDLP_RETRY_ATTEMPTS = 3
 YTDLP_RETRY_MAX_SLEEP_SEC = 8.0
 
+# Экстрактор TikTok просит «любую» цель имперсонации, и yt-dlp берёт самую
+# свежую из curl_cffi. WAF TikTok эту самую свежую цель отдаёт заглушкой
+# «Site Maintenance» (~500 байт), после чего извлечение падает с «Unexpected
+# response from webpage request». Любая цель чуть постарше при этом работает,
+# поэтому выбираем цель сами: список от новых к старым, первая доступная
+# становится основной, остальные — запасные при блокировке.
+IMPERSONATE_TARGETS: tuple[str, ...] = (
+    "chrome-146",
+    "chrome-145",
+    "chrome-142",
+    "chrome-136",
+    "chrome-133",
+    "chrome-131",
+    "firefox-144",
+    "safari-18.4",
+    "edge-101",
+)
+
+
+class _ImpersonatingYDL(yt_dlp.YoutubeDL):
+    """yt-dlp, который сам выбирает цель имперсонации из наших предпочтений.
+
+    Когда экстрактор запрашивает имперсонацию без конкретной цели (TikTok
+    делает именно так), yt-dlp игнорирует опцию `impersonate` и берёт первую
+    цель бэкенда. Подставляем свой список — так на запрос уходит цель, которую
+    TikTok не блокирует.
+    """
+
+    def __init__(self, params: dict | None = None, *, targets: tuple[str, ...] = (), **kwargs):
+        self._preferred_impersonate_targets = tuple(targets)
+        super().__init__(params, **kwargs)
+
+    def _parse_impersonate_targets(self, impersonate):
+        wants_any_target = impersonate in (True, "") or impersonate == ImpersonateTarget()
+        if self._preferred_impersonate_targets and wants_any_target:
+            impersonate = list(self._preferred_impersonate_targets)
+        return super()._parse_impersonate_targets(impersonate)
+
+
+@functools.cache
+def available_impersonate_targets() -> tuple[str, ...]:
+    """Наши предпочитаемые цели, которые поддерживает текущая сборка yt-dlp.
+
+    Пустой кортеж означает «выбирать не из чего» — тогда работаем на дефолтном
+    поведении yt-dlp (или вовсе без имперсонации, если нет curl_cffi).
+    """
+    try:
+        with yt_dlp.YoutubeDL({"quiet": True, "no_warnings": True, "ignoreconfig": True}) as ydl:
+            return tuple(
+                target
+                for target in IMPERSONATE_TARGETS
+                # приватный API yt-dlp, но публичного эквивалента нет
+                if ydl._impersonate_target_available(ImpersonateTarget.from_str(target))
+            )
+    except Exception:  # не роняем загрузку из-за приватного API
+        logger.debug("Could not probe yt-dlp impersonate targets.", exc_info=True)
+        return ()
+
 
 def impersonation_available() -> bool:
     """Доступна ли yt-dlp имперсонация браузера (бэкенд curl_cffi).
@@ -89,6 +149,17 @@ def log_impersonation_status() -> bool:
             "yt-dlp has no browser impersonation backend (curl_cffi is missing). "
             "TikTok downloads will fail with 'Unexpected response from webpage request'. "
             "Install it: pip install 'yt-dlp[default,curl-cffi]'"
+        )
+        return available
+
+    targets = available_impersonate_targets()
+    if targets:
+        logger.info("yt-dlp impersonation targets (in order of preference): %s", ", ".join(targets))
+    else:
+        logger.warning(
+            "None of the preferred impersonation targets (%s) are supported by this build; "
+            "yt-dlp will pick its own, which TikTok may block. Try upgrading curl-cffi.",
+            ", ".join(IMPERSONATE_TARGETS),
         )
     return available
 
@@ -131,9 +202,6 @@ def build_ydl_opts(
         "extractor_retries": YTDLP_RETRY_ATTEMPTS,
         "file_access_retries": YTDLP_RETRY_ATTEMPTS,
     }
-
-    if is_tiktok_url(url):
-        ydl_opts["extractor_args"] = {"tiktok": {"app_version": ""}}
 
     if download:
         if not output_template:
@@ -326,6 +394,12 @@ _DNS_ERROR_TOKENS = (
     "failed to resolve",
     "getaddrinfo failed",
 )
+# TikTok отдаёт WAF-заглушку вместо страницы видео, когда ему не нравится
+# отпечаток браузера. Лечится не паузой, а сменой цели имперсонации.
+_IMPERSONATION_BLOCK_ERROR_TOKENS = (
+    "unexpected response from webpage request",
+    "unable to extract challenge data",
+)
 _RETRYABLE_YTDLP_ERROR_TOKENS = _DNS_ERROR_TOKENS + (
     "transporterror",
     "network is unreachable",
@@ -400,6 +474,12 @@ def _rewrite_download_error(err_msg: str) -> str:
             "Бот уже сделал несколько автоматических попыток, но адрес всё ещё не резолвится. "
             "Проверьте DNS и доступ в интернет у контейнера/сервера."
         )
+    if _is_impersonation_block_error(err_msg):
+        return (
+            "TikTok не отдал страницу видео — сработала защита от ботов. "
+            "Бот перебрал все доступные браузерные отпечатки, но ни один не подошёл. "
+            "Попробуйте позже; если повторяется — обновите curl-cffi и yt-dlp."
+        )
     return err_msg
 
 
@@ -408,19 +488,44 @@ def _is_retryable_ytdlp_error(err_msg: str) -> bool:
     return any(token in lower_err for token in _RETRYABLE_YTDLP_ERROR_TOKENS)
 
 
+def _is_impersonation_block_error(err_msg: str) -> bool:
+    lower_err = err_msg.lower()
+    return any(token in lower_err for token in _IMPERSONATION_BLOCK_ERROR_TOKENS)
+
+
+def _open_ydl(ydl_opts: dict, targets: tuple[str, ...]) -> yt_dlp.YoutubeDL:
+    """yt-dlp с заданным порядком целей имперсонации (первая доступная — рабочая)."""
+    return _ImpersonatingYDL(ydl_opts, targets=targets)
+
+
 def _extract_with_retries(url: str, ydl_opts: dict, *, download: bool) -> dict:
     action = "download" if download else "metadata fetch"
+    targets = available_impersonate_targets()
+    target_index = 0
+    attempt = 0
 
-    for attempt in range(1, YTDLP_RETRY_ATTEMPTS + 1):
+    while True:
         try:
-            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            with _open_ydl(ydl_opts, targets[target_index:]) as ydl:
                 return ydl.extract_info(url, download=download)
         except yt_dlp.utils.DownloadError as e:
-            if attempt >= YTDLP_RETRY_ATTEMPTS:
-                raise
-
             err_msg = str(e)
-            if not _is_retryable_ytdlp_error(err_msg):
+
+            # Заблокировали отпечаток — берём следующую цель, ждать смысла нет.
+            if _is_impersonation_block_error(err_msg) and target_index + 1 < len(targets):
+                logger.warning(
+                    "Impersonation target %s looks blocked during %s of %s: %s. Retrying as %s",
+                    targets[target_index],
+                    action,
+                    url,
+                    err_msg,
+                    targets[target_index + 1],
+                )
+                target_index += 1
+                continue
+
+            attempt += 1
+            if attempt >= YTDLP_RETRY_ATTEMPTS or not _is_retryable_ytdlp_error(err_msg):
                 raise
 
             sleep_for = min(2 ** (attempt - 1), YTDLP_RETRY_MAX_SLEEP_SEC)
@@ -434,8 +539,6 @@ def _extract_with_retries(url: str, ydl_opts: dict, *, download: bool) -> dict:
                 sleep_for,
             )
             time.sleep(sleep_for)
-
-    raise RuntimeError("unreachable")
 
 
 # --------------------------------------------------------------------------- #

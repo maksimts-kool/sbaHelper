@@ -16,12 +16,14 @@ from unittest.mock import patch
 import yt_dlp
 
 from downloader.download import (
+    IMPERSONATE_TARGETS,
     DownloadError,
     FileTooLargeError,
     UnsupportedContentError,
     VideoTooLongError,
     _extract_with_retries,
     _file_has_audio_stream,
+    _ImpersonatingYDL,
     _rewrite_download_error,
     build_ydl_opts,
     cleanup,
@@ -69,9 +71,10 @@ class YdlOptionsTest(unittest.TestCase):
         self.assertEqual(opts["merge_output_format"], "mp4")
         self.assertNotIn("skip_download", opts)
 
-    def test_tiktok_gets_its_extractor_workaround(self) -> None:
-        self.assertIn("tiktok", build_ydl_opts(TIKTOK_URL, download=False)["extractor_args"])
-        self.assertNotIn("extractor_args", build_ydl_opts(YOUTUBE_URL, download=False))
+    def test_no_extractor_args_are_forced(self) -> None:
+        for url in (TIKTOK_URL, YOUTUBE_URL):
+            with self.subTest(url=url):
+                self.assertNotIn("extractor_args", build_ydl_opts(url, download=False))
 
     def test_existing_cookie_file_is_used(self) -> None:
         with tempfile.NamedTemporaryFile(suffix=".txt", delete=False) as handle:
@@ -204,12 +207,49 @@ class FetchInfoTest(unittest.TestCase):
                 fetch_info(YOUTUBE_URL)
 
 
+class ImpersonationTest(unittest.TestCase):
+    """Цель имперсонации выбираем сами: дефолтную TikTok блокирует WAF."""
+
+    def test_any_target_request_is_replaced_by_our_preferences(self) -> None:
+        targets = ("chrome-131", "firefox-144")
+        with _ImpersonatingYDL({"quiet": True, "ignoreconfig": True}, targets=targets) as ydl:
+            _, requested = ydl._parse_impersonate_targets(True)
+
+        self.assertEqual([str(target) for target in requested], list(targets))
+
+    def test_explicit_target_is_left_alone(self) -> None:
+        with _ImpersonatingYDL(
+            {"quiet": True, "ignoreconfig": True}, targets=("chrome-131",)
+        ) as ydl:
+            _, requested = ydl._parse_impersonate_targets("safari-18.4")
+
+        self.assertEqual([str(target) for target in requested], ["safari-18.4"])
+
+    def test_preferences_do_not_include_the_blocked_default(self) -> None:
+        # yt-dlp сам берёт самую свежую цель curl_cffi — её TikTok и блокирует.
+        self.assertNotIn("chrome-150", IMPERSONATE_TARGETS)
+
+
 class RetryTest(unittest.TestCase):
-    def _extract(self, side_effect):
-        with patch("downloader.download.yt_dlp.YoutubeDL") as ydl_class:
-            ydl = ydl_class.return_value.__enter__.return_value
+    def _extract(self, side_effect, targets=("chrome-146",)):
+        opened: list[tuple[str, ...]] = []
+        self._opened = opened
+
+        def fake_open(ydl_opts, ydl_targets):
+            opened.append(tuple(ydl_targets))
+            return ydl_context
+
+        with patch("downloader.download._open_ydl", side_effect=fake_open) as opener:
+            ydl_context = opener.return_value
+            ydl = ydl_context.__enter__.return_value
             ydl.extract_info.side_effect = side_effect
-            with patch("downloader.download.time.sleep"):
+            with (
+                patch("downloader.download.time.sleep"),
+                patch(
+                    "downloader.download.available_impersonate_targets",
+                    return_value=tuple(targets),
+                ),
+            ):
                 result = _extract_with_retries(YOUTUBE_URL, {}, download=False)
             return result, ydl.extract_info.call_count
 
@@ -229,11 +269,38 @@ class RetryTest(unittest.TestCase):
         with self.assertRaises(yt_dlp.utils.DownloadError):
             self._extract(yt_dlp.utils.DownloadError("Read timed out"))
 
+    def test_blocked_impersonation_target_is_swapped_for_the_next_one(self) -> None:
+        blocked = yt_dlp.utils.DownloadError(
+            "ERROR: [TikTok] 123: Unexpected response from webpage request"
+        )
+        result, calls = self._extract([blocked, {"id": "ok"}], targets=("chrome-146", "chrome-142"))
+
+        self.assertEqual(result, {"id": "ok"})
+        self.assertEqual(calls, 2)
+        self.assertEqual(self._opened, [("chrome-146", "chrome-142"), ("chrome-142",)])
+
+    def test_block_is_reported_once_the_targets_run_out(self) -> None:
+        blocked = yt_dlp.utils.DownloadError(
+            "ERROR: [TikTok] 123: Unexpected response from webpage request"
+        )
+        with self.assertRaises(yt_dlp.utils.DownloadError):
+            self._extract(blocked, targets=("chrome-146", "chrome-142"))
+
+        self.assertEqual(len(self._opened), 2)
+
     def test_dns_failures_get_an_actionable_message(self) -> None:
         rewritten = _rewrite_download_error("ERROR: getaddrinfo failed")
 
         self.assertIn("DNS", rewritten)
         self.assertNotIn("getaddrinfo", rewritten)
+
+    def test_exhausted_impersonation_gets_a_readable_message(self) -> None:
+        rewritten = _rewrite_download_error(
+            "ERROR: [TikTok] 123: Unexpected response from webpage request"
+        )
+
+        self.assertIn("защита от ботов", rewritten)
+        self.assertNotIn("Unexpected response", rewritten)
 
     def test_unrelated_errors_are_passed_through(self) -> None:
         self.assertEqual(_rewrite_download_error("Video unavailable"), "Video unavailable")
