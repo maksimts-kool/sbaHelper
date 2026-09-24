@@ -1,77 +1,31 @@
-"""
-Заглушки внешних зависимостей, чтобы тесты запускались без установленных
-`telegram`, `yt_dlp`, `dotenv` и `sentry_sdk`.
-
-pytest импортирует conftest до сбора тестов, поэтому заглушки успевают встать
-раньше, чем тестовые модули импортируют `downloader.*`. Если настоящий пакет
-установлен (как в CI), заглушка не ставится вовсе — иначе она перекрыла бы
-настоящий пакет вместе со всеми подмодулями (`telegram.ext` и прочими).
-"""
+"""Shared fixtures. Every test gets default settings and a private cookie directory,
+so nothing depends on the developer's environment."""
 
 from __future__ import annotations
 
-import importlib.util
-import sys
-import types
+from datetime import time
+from pathlib import Path
+from zoneinfo import ZoneInfo
+
+import pytest
+
+from sbahelper.config import settings
 
 
-def _is_installed(module_name: str) -> bool:
-    try:
-        return importlib.util.find_spec(module_name) is not None
-    except (ImportError, ValueError):
-        return False
-
-
-def _stub_unless_installed(top_level: str, build) -> None:
-    if top_level in sys.modules or _is_installed(top_level):
-        return
-    sys.modules.update(build())
-
-
-def _dotenv() -> dict[str, types.ModuleType]:
-    dotenv = types.ModuleType("dotenv")
-    dotenv.load_dotenv = lambda *args, **kwargs: None
-    return {"dotenv": dotenv}
-
-
-def _sentry_sdk() -> dict[str, types.ModuleType]:
-    sentry_sdk = types.ModuleType("sentry_sdk")
-    sentry_sdk.init = lambda **kwargs: None
-    sentry_sdk.set_tag = lambda *args, **kwargs: None
-    sentry_sdk.capture_exception = lambda *args, **kwargs: None
-    sentry_sdk.flush = lambda *args, **kwargs: None
-    return {"sentry_sdk": sentry_sdk}
-
-
-def _telegram() -> dict[str, types.ModuleType]:
-    telegram = types.ModuleType("telegram")
-    telegram_error = types.ModuleType("telegram.error")
-
-    class NetworkError(Exception):
-        pass
-
-    telegram_error.NetworkError = NetworkError
-    telegram.error = telegram_error
-    return {"telegram": telegram, "telegram.error": telegram_error}
-
-
-def _yt_dlp() -> dict[str, types.ModuleType]:
-    yt_dlp = types.ModuleType("yt_dlp")
-    yt_dlp_utils = types.ModuleType("yt_dlp.utils")
-
-    class YtdlpDownloadError(Exception):
-        pass
-
-    yt_dlp_utils.DownloadError = YtdlpDownloadError
-    yt_dlp.utils = yt_dlp_utils
-    yt_dlp.YoutubeDL = object
-    return {"yt_dlp": yt_dlp, "yt_dlp.utils": yt_dlp_utils}
-
-
-for _top_level, _build in (
-    ("dotenv", _dotenv),
-    ("sentry_sdk", _sentry_sdk),
-    ("telegram", _telegram),
-    ("yt_dlp", _yt_dlp),
-):
-    _stub_unless_installed(_top_level, _build)
+@pytest.fixture(autouse=True)
+def default_settings(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    for name, value in {
+        "allowed_chat_ids": frozenset(),
+        "admin_ids": frozenset(),
+        "tz": ZoneInfo("Europe/Tallinn"),
+        "max_file_size_mb": 50,
+        "max_duration_sec": 300,
+        "cookies_dir": tmp_path / "cookies",
+        "check_urls": {"tiktok": "", "youtube": ""},
+        "stats_enabled": True,
+        "stats_db_path": tmp_path / "stats.db",
+        "stats_weekday": 6,
+        "stats_time": time(20),
+        "stats_retention_days": 400,
+    }.items():
+        monkeypatch.setattr(settings, name, value)

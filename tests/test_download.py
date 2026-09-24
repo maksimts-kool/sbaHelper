@@ -1,443 +1,381 @@
-"""Движок загрузки — `downloader/download.py`.
+"""The yt-dlp engine. yt-dlp itself is replaced by fakes: no network, no ffmpeg."""
 
-Настоящий yt-dlp и сеть не используются: `_extract_with_retries` подменяется,
-а «скачанный» файл создаётся во временной папке.
-"""
-
-from __future__ import annotations
-
-import os
 import tempfile
-import unittest
-from contextlib import ExitStack
 from pathlib import Path
-from unittest.mock import patch
+from types import SimpleNamespace
+from unittest.mock import MagicMock
 
+import pytest
 import yt_dlp
 
-from downloader.download import (
-    IMPERSONATE_TARGETS,
+from sbahelper import download
+from sbahelper.config import settings
+from sbahelper.download import (
+    Blocked,
     DownloadError,
-    FileTooLargeError,
-    UnsupportedContentError,
-    VideoTooLongError,
-    _extract_with_retries,
-    _file_has_audio_stream,
-    _ImpersonatingYDL,
-    _rewrite_download_error,
-    build_ydl_opts,
-    cleanup,
+    LoginRequired,
+    Rejected,
+    clean_error,
     download_video,
-    fetch_info,
-    get_format_selector,
-    normalize_video_info,
-    parse_compact_count,
-    pick_video_dimensions,
+    format_selector,
+    parse_count,
+    user_error,
+    validate,
+    video_info,
 )
 
-TIKTOK_URL = "https://www.tiktok.com/@user/video/123"
-YOUTUBE_URL = "https://youtu.be/abc123"
+TIKTOK = "https://www.tiktok.com/@user/video/123"
+YOUTUBE = "https://youtube.com/shorts/abc123"
 
 
-def video_meta(**overrides) -> dict:
-    meta = {
+def meta(**overrides) -> dict:
+    return {
         "title": "Clip",
         "uploader": "Author",
         "duration": 30,
         "width": 720,
         "height": 1280,
         "formats": [{"vcodec": "h264", "width": 720, "height": 1280}],
+        **overrides,
     }
-    meta.update(overrides)
-    return meta
 
 
-class YdlOptionsTest(unittest.TestCase):
-    def test_metadata_mode_does_not_expand_playlists(self) -> None:
-        opts = build_ydl_opts(YOUTUBE_URL, download=False)
+# --------------------------------------------------------------------------- #
+#  Options                                                                    #
+# --------------------------------------------------------------------------- #
 
-        self.assertTrue(opts["skip_download"])
-        self.assertTrue(opts["noplaylist"])
-        self.assertEqual(opts["extract_flat"], "in_playlist")
 
-    def test_download_mode_needs_an_output_template(self) -> None:
-        with self.assertRaises(ValueError):
-            build_ydl_opts(YOUTUBE_URL, download=True)
+def test_selectors_cap_the_short_side_and_the_size() -> None:
+    for platform in ("tiktok", "youtube"):
+        selector = format_selector(platform)
+        assert "[width<=?1080]" in selector
+        assert "height<=" not in selector  # vertical video: height is the long side
+        assert selector.endswith("/b")
+    assert "[filesize<50M]" in format_selector("tiktok")
+    assert "[filesize_approx<45M]" in format_selector("youtube")
 
-    def test_download_mode_sets_output_and_format(self) -> None:
-        opts = build_ydl_opts(YOUTUBE_URL, download=True, output_template="/tmp/out.%(ext)s")
 
-        self.assertEqual(opts["outtmpl"], "/tmp/out.%(ext)s")
-        self.assertEqual(opts["merge_output_format"], "mp4")
-        self.assertNotIn("skip_download", opts)
+def test_tiktok_prefers_files_that_already_have_audio() -> None:
+    selector = format_selector("tiktok")
+    assert "[acodec!=none]" in selector.split("/")[0]
+    assert selector.index("[acodec!=none]") < selector.index("+ba")
 
-    def test_no_extractor_args_are_forced(self) -> None:
-        for url in (TIKTOK_URL, YOUTUBE_URL):
-            with self.subTest(url=url):
-                self.assertNotIn("extractor_args", build_ydl_opts(url, download=False))
 
-    def test_existing_cookie_file_is_used(self) -> None:
-        with tempfile.NamedTemporaryFile(suffix=".txt", delete=False) as handle:
-            cookie_path = handle.name
-        self.addCleanup(os.remove, cookie_path)
+def test_youtube_prefers_h264() -> None:
+    assert "[vcodec^=avc]" in format_selector("youtube").split("/")[0]
 
-        with patch("downloader.download.COOKIES_FILE", cookie_path):
-            opts = build_ydl_opts(TIKTOK_URL, download=False)
 
-        self.assertEqual(opts["cookiefile"], cookie_path)
+def test_options_wire_cookies_and_progress(tmp_path: Path) -> None:
+    seen: list[float] = []
+    opts = download._options("tiktok", tmp_path, "/c/tiktok.txt", seen.append)
+    hook = opts["progress_hooks"][0]
 
-    def test_missing_cookie_file_is_ignored(self) -> None:
-        with patch("downloader.download.COOKIES_FILE", "/nope/cookies.txt"):
-            opts = build_ydl_opts(TIKTOK_URL, download=False)
+    hook({"status": "downloading", "downloaded_bytes": 25, "total_bytes": 100})
+    hook({"status": "downloading", "downloaded_bytes": 5})  # no total yet
+    hook({"status": "finished"})
 
-        self.assertNotIn("cookiefile", opts)
+    assert opts["cookiefile"] == "/c/tiktok.txt"
+    assert opts["outtmpl"] == str(tmp_path / "video.%(ext)s")
+    assert seen == [25.0]
 
-    def test_tiktok_selector_prefers_formats_that_carry_audio(self) -> None:
-        selector = get_format_selector(TIKTOK_URL)
-        first_choice = selector.split("/")[0]
 
-        self.assertIn("[acodec!=none]", first_choice)
-        self.assertIn("[filesize<", first_choice)
-        # Отдельная видеодорожка со склейкой — только как запасной вариант.
-        self.assertLess(selector.index("[acodec!=none]"), selector.index("+bestaudio"))
+def test_progress_callback_errors_never_break_the_download(tmp_path: Path) -> None:
+    def broken(_: float) -> None:
+        raise RuntimeError("UI is gone")
 
-    def test_every_selector_caps_the_resolution(self) -> None:
-        for url in (TIKTOK_URL, YOUTUBE_URL):
-            with self.subTest(url=url):
-                self.assertIn("height<=1080", get_format_selector(url))
-
+    opts = download._options("youtube", tmp_path, None, broken)
+    opts["progress_hooks"][0]({"status": "downloading", "downloaded_bytes": 1, "total_bytes": 2})
+    assert "cookiefile" not in opts
 
-class MetadataTest(unittest.TestCase):
-    def test_compact_counts(self) -> None:
-        self.assertEqual(parse_compact_count("1.5K"), 1500)
-        self.assertEqual(parse_compact_count("2 M"), 2_000_000)
-        self.assertEqual(parse_compact_count("1,234"), 1234)
-        self.assertIsNone(parse_compact_count("many"))
 
-    def test_dimensions_fall_back_to_the_first_format(self) -> None:
-        self.assertEqual(
-            pick_video_dimensions({"formats": [{"width": 720, "height": 1280}]}), (720, 1280)
-        )
+# --------------------------------------------------------------------------- #
+#  Metadata and validation                                                    #
+# --------------------------------------------------------------------------- #
 
-    def test_top_level_dimensions_win(self) -> None:
-        meta = {"width": 1080, "height": 1920, "formats": [{"width": 1, "height": 1}]}
-        self.assertEqual(pick_video_dimensions(meta), (1080, 1920))
 
-    def test_missing_fields_get_readable_placeholders(self) -> None:
-        info = normalize_video_info(YOUTUBE_URL, {}, 0)
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [(1500, 1500), (2.7, 2), ("1.5K", 1500), ("2 M", 2_000_000), ("1,234", 1234), ("many", None)],
+)
+def test_counts(raw, expected) -> None:
+    assert parse_count(raw) == expected
 
-        self.assertEqual(info.title, "Без названия")
-        self.assertEqual(info.uploader, "Неизвестно")
-        self.assertIsNone(info.view_count)
 
-    def test_counts_are_picked_from_alternative_keys(self) -> None:
-        info = normalize_video_info(
-            TIKTOK_URL, {"play_count": "1.2K", "repost_count": 7, "channel": "creator"}, 10
-        )
+def test_missing_fields_get_placeholders() -> None:
+    info = video_info("youtube", {})
+    assert (info.title, info.uploader, info.duration, info.view_count) == (
+        "Без названия",
+        "Неизвестно",
+        0,
+        None,
+    )
 
-        self.assertEqual(info.view_count, 1200)
-        self.assertEqual(info.like_count, 7)
 
-    def test_generated_tiktok_title_is_replaced_by_the_description(self) -> None:
-        info = normalize_video_info(
-            TIKTOK_URL,
-            {"title": "TikTok video #7234567890", "description": "Настоящее описание"},
-            10,
-        )
+def test_tiktok_generated_title_is_replaced_by_the_description() -> None:
+    info = video_info(
+        "tiktok",
+        {
+            "title": "TikTok video #7234567890",
+            "description": "Кот",
+            "channel": "cat",
+            "play_count": "1.2K",
+        },
+    )
+    assert (info.title, info.uploader, info.view_count) == ("Кот", "cat", 1200)
 
-        self.assertEqual(info.title, "Настоящее описание")
 
-    def test_real_tiktok_title_is_kept(self) -> None:
-        info = normalize_video_info(
-            TIKTOK_URL, {"title": "Кот и холодильник", "description": "..."}, 10
-        )
-
-        self.assertEqual(info.title, "Кот и холодильник")
-
-
-class FetchInfoTest(unittest.TestCase):
-    """`fetch_info` — единственный фильтр: пропускает только короткие вертикальные."""
-
-    def fetch(self, meta: dict, url: str = YOUTUBE_URL):
-        with patch("downloader.download._extract_with_retries", return_value=meta):
-            return fetch_info(url)
-
-    def test_short_vertical_video_is_accepted(self) -> None:
-        info = self.fetch(video_meta(duration=30))
-
-        self.assertEqual((info.width, info.height), (720, 1280))
-        self.assertEqual(info.duration, 30)
-
-    def test_horizontal_video_is_rejected_before_the_duration_check(self) -> None:
-        # Длинное горизонтальное видео должно объясняться ориентацией,
-        # а не длительностью — так понятнее пользователю.
-        meta = video_meta(duration=1128, width=1920, height=1080)
-        with self.assertRaises(UnsupportedContentError):
-            self.fetch(meta)
-
-    def test_long_vertical_video_is_rejected_as_too_long(self) -> None:
-        with self.assertRaises(VideoTooLongError):
-            self.fetch(video_meta(duration=1128))
-
-    def test_playlist_or_profile_is_rejected(self) -> None:
-        with self.assertRaises(UnsupportedContentError):
-            self.fetch({"_type": "playlist", "entries": [{"id": "a"}]}, TIKTOK_URL)
-
-    def test_live_stream_is_rejected(self) -> None:
-        for live_status in ("is_live", "is_upcoming", "was_live", "post_live"):
-            with self.subTest(live_status=live_status):
-                with self.assertRaises(UnsupportedContentError):
-                    self.fetch(video_meta(live_status=live_status))
-
-    def test_photo_post_is_rejected(self) -> None:
-        meta = video_meta(formats=[{"vcodec": "none"}, {"vcodec": None}])
-        with self.assertRaises(UnsupportedContentError):
-            self.fetch(meta)
-
-    def test_photo_link_error_gets_a_friendly_message(self) -> None:
-        error = yt_dlp.utils.DownloadError("Unsupported URL: https://tiktok.com/@u/photo/1")
-        with patch("downloader.download._extract_with_retries", side_effect=error):
-            with self.assertRaises(UnsupportedContentError):
-                fetch_info("https://www.tiktok.com/@u/photo/1")
-
-    def test_other_ytdlp_errors_surface_as_download_errors(self) -> None:
-        error = yt_dlp.utils.DownloadError("Video unavailable")
-        with patch("downloader.download._extract_with_retries", side_effect=error):
-            with self.assertRaises(DownloadError):
-                fetch_info(YOUTUBE_URL)
-
-
-class ImpersonationTest(unittest.TestCase):
-    """Цель имперсонации выбираем сами: дефолтную TikTok блокирует WAF."""
-
-    def test_any_target_request_is_replaced_by_our_preferences(self) -> None:
-        targets = ("chrome-131", "firefox-144")
-        with _ImpersonatingYDL({"quiet": True, "ignoreconfig": True}, targets=targets) as ydl:
-            _, requested = ydl._parse_impersonate_targets(True)
-
-        self.assertEqual([str(target) for target in requested], list(targets))
-
-    def test_explicit_target_is_left_alone(self) -> None:
-        with _ImpersonatingYDL(
-            {"quiet": True, "ignoreconfig": True}, targets=("chrome-131",)
-        ) as ydl:
-            _, requested = ydl._parse_impersonate_targets("safari-18.4")
-
-        self.assertEqual([str(target) for target in requested], ["safari-18.4"])
-
-    def test_preferences_do_not_include_the_blocked_default(self) -> None:
-        # yt-dlp сам берёт самую свежую цель curl_cffi — её TikTok и блокирует.
-        self.assertNotIn("chrome-150", IMPERSONATE_TARGETS)
-
-
-class RetryTest(unittest.TestCase):
-    def _extract(self, side_effect, targets=("chrome-146",)):
-        opened: list[tuple[str, ...]] = []
-        self._opened = opened
-
-        def fake_open(ydl_opts, ydl_targets):
-            opened.append(tuple(ydl_targets))
-            return ydl_context
-
-        with patch("downloader.download._open_ydl", side_effect=fake_open) as opener:
-            ydl_context = opener.return_value
-            ydl = ydl_context.__enter__.return_value
-            ydl.extract_info.side_effect = side_effect
-            with (
-                patch("downloader.download.time.sleep"),
-                patch(
-                    "downloader.download.available_impersonate_targets",
-                    return_value=tuple(targets),
-                ),
-            ):
-                result = _extract_with_retries(YOUTUBE_URL, {}, download=False)
-            return result, ydl.extract_info.call_count
-
-    def test_transient_failure_is_retried(self) -> None:
-        result, calls = self._extract(
-            [yt_dlp.utils.DownloadError("Connection reset by peer"), {"id": "ok"}]
-        )
-
-        self.assertEqual(result, {"id": "ok"})
-        self.assertEqual(calls, 2)
-
-    def test_permanent_failure_is_not_retried(self) -> None:
-        with self.assertRaises(yt_dlp.utils.DownloadError):
-            self._extract([yt_dlp.utils.DownloadError("Video unavailable")])
-
-    def test_retries_eventually_give_up(self) -> None:
-        with self.assertRaises(yt_dlp.utils.DownloadError):
-            self._extract(yt_dlp.utils.DownloadError("Read timed out"))
-
-    def test_blocked_impersonation_target_is_swapped_for_the_next_one(self) -> None:
-        blocked = yt_dlp.utils.DownloadError(
-            "ERROR: [TikTok] 123: Unexpected response from webpage request"
-        )
-        result, calls = self._extract([blocked, {"id": "ok"}], targets=("chrome-146", "chrome-142"))
-
-        self.assertEqual(result, {"id": "ok"})
-        self.assertEqual(calls, 2)
-        self.assertEqual(self._opened, [("chrome-146", "chrome-142"), ("chrome-142",)])
-
-    def test_block_is_reported_once_the_targets_run_out(self) -> None:
-        blocked = yt_dlp.utils.DownloadError(
-            "ERROR: [TikTok] 123: Unexpected response from webpage request"
-        )
-        with self.assertRaises(yt_dlp.utils.DownloadError):
-            self._extract(blocked, targets=("chrome-146", "chrome-142"))
-
-        self.assertEqual(len(self._opened), 2)
-
-    def test_dns_failures_get_an_actionable_message(self) -> None:
-        rewritten = _rewrite_download_error("ERROR: getaddrinfo failed")
-
-        self.assertIn("DNS", rewritten)
-        self.assertNotIn("getaddrinfo", rewritten)
-
-    def test_exhausted_impersonation_gets_a_readable_message(self) -> None:
-        rewritten = _rewrite_download_error(
-            "ERROR: [TikTok] 123: Unexpected response from webpage request"
-        )
-
-        self.assertIn("защита от ботов", rewritten)
-        self.assertNotIn("Unexpected response", rewritten)
-
-    def test_unrelated_errors_are_passed_through(self) -> None:
-        self.assertEqual(_rewrite_download_error("Video unavailable"), "Video unavailable")
-
-
-class AudioProbeTest(unittest.TestCase):
-    def _probe(self, stdout: str):
-        from types import SimpleNamespace
-
-        with patch(
-            "downloader.download.subprocess.run",
-            return_value=SimpleNamespace(stdout=stdout),
-        ):
-            return _file_has_audio_stream("/tmp/video.mp4")
-
-    def test_detects_an_audio_stream(self) -> None:
-        self.assertTrue(self._probe('{"streams":[{"codec_type":"video"},{"codec_type":"audio"}]}'))
-
-    def test_detects_a_silent_file(self) -> None:
-        self.assertFalse(self._probe('{"streams":[{"codec_type":"video"}]}'))
-
-    def test_unreadable_output_is_inconclusive(self) -> None:
-        # None ≠ False: без ffprobe нельзя утверждать, что звука нет.
-        self.assertIsNone(self._probe("not json"))
-
-    def test_missing_ffprobe_is_inconclusive(self) -> None:
-        with patch("downloader.download.subprocess.run", side_effect=FileNotFoundError):
-            self.assertIsNone(_file_has_audio_stream("/tmp/video.mp4"))
-
-
-class DownloadVideoTest(unittest.TestCase):
-    def setUp(self) -> None:
-        self._tempdir = tempfile.TemporaryDirectory()
-        self.addCleanup(self._tempdir.cleanup)
-        self.out_dir = self._tempdir.name
-
-    def run_download(
-        self, *, url=YOUTUBE_URL, meta=None, payload=b"video", has_audio=True, max_size_mb=50
-    ):
-        """Запускает `download_video` с подменённым извлечением и временной папкой."""
-        meta = meta if meta is not None else video_meta()
-
-        def fake_extract(_url, ydl_opts, *, download):
-            if download:
-                path = ydl_opts["outtmpl"].replace("%(title)s", "clip").replace("%(ext)s", "mp4")
-                Path(path).write_bytes(payload)
-            return meta
-
-        with ExitStack() as stack:
-            stack.enter_context(patch("downloader.download.DOWNLOAD_DIR", self.out_dir))
-            stack.enter_context(patch("downloader.download.MAX_FILE_SIZE_MB", max_size_mb))
-            stack.enter_context(
-                patch("downloader.download._extract_with_retries", side_effect=fake_extract)
-            )
-            stack.enter_context(
-                patch("downloader.download._file_has_audio_stream", return_value=has_audio)
-            )
-            return download_video(url)
-
-    def remaining_files(self) -> list[str]:
-        return os.listdir(self.out_dir)
-
-    def test_successful_download_returns_the_file_and_metadata(self) -> None:
-        result = self.run_download(meta=video_meta(title="Кот", uploader="catlover"))
-
-        self.assertTrue(os.path.exists(result.file_path))
-        self.assertEqual(result.info.title, "Кот")
-        self.assertEqual(result.info.uploader, "catlover")
-        self.assertEqual(result.info.duration, 30)
-
-    def test_progress_callback_receives_percentages(self) -> None:
-        seen: list[float] = []
-
-        def fake_extract(_url, ydl_opts, *, download):
-            hook = ydl_opts["progress_hooks"][0]
-            hook({"status": "downloading", "downloaded_bytes": 25, "total_bytes": 100})
-            hook({"status": "finished"})
-            path = ydl_opts["outtmpl"].replace("%(title)s", "clip").replace("%(ext)s", "mp4")
-            Path(path).write_bytes(b"video")
-            return video_meta()
-
-        with ExitStack() as stack:
-            stack.enter_context(patch("downloader.download.DOWNLOAD_DIR", self.out_dir))
-            stack.enter_context(
-                patch("downloader.download._extract_with_retries", side_effect=fake_extract)
-            )
-            stack.enter_context(
-                patch("downloader.download._file_has_audio_stream", return_value=True)
-            )
-            download_video(YOUTUBE_URL, on_progress=seen.append)
-
-        self.assertEqual(seen, [25.0])
-
-    def test_oversized_file_is_rejected_and_deleted(self) -> None:
-        with self.assertRaises(FileTooLargeError):
-            self.run_download(max_size_mb=0)
-
-        self.assertEqual(self.remaining_files(), [])
-
-    def test_silent_tiktok_is_rejected_and_deleted(self) -> None:
-        with self.assertRaises(DownloadError):
-            self.run_download(url=TIKTOK_URL, has_audio=False)
-
-        self.assertEqual(self.remaining_files(), [])
-
-    def test_silent_youtube_video_is_kept(self) -> None:
-        # Проверка на звук нужна только TikTok, где встречаются немые склейки.
-        result = self.run_download(url=YOUTUBE_URL, has_audio=False)
-
-        self.assertTrue(os.path.exists(result.file_path))
-
-    def test_video_over_the_hard_duration_limit_is_rejected(self) -> None:
-        with patch("downloader.download.MAX_DURATION_SEC", 60):
-            with self.assertRaises(VideoTooLongError):
-                self.run_download(meta=video_meta(duration=120))
-
-    def test_missing_output_file_is_reported(self) -> None:
-        def fake_extract(_url, _opts, *, download):
-            return video_meta()
-
-        with ExitStack() as stack:
-            stack.enter_context(patch("downloader.download.DOWNLOAD_DIR", self.out_dir))
-            stack.enter_context(
-                patch("downloader.download._extract_with_retries", side_effect=fake_extract)
-            )
-            with self.assertRaises(DownloadError):
-                download_video(YOUTUBE_URL)
-
-    def test_cleanup_removes_the_file_and_tolerates_a_missing_one(self) -> None:
-        path = os.path.join(self.out_dir, "clip.mp4")
-        Path(path).write_bytes(b"x")
-
-        cleanup(path)
-        cleanup(path)
-
-        self.assertFalse(os.path.exists(path))
-
-
-if __name__ == "__main__":
-    unittest.main()
+def test_dimensions_fall_back_to_the_formats() -> None:
+    info = video_info("tiktok", {"formats": [{"width": 576, "height": 1024}]})
+    assert (info.width, info.height) == (576, 1024)
+
+
+def test_short_vertical_video_passes() -> None:
+    assert validate("youtube", meta()).duration == 30
+
+
+@pytest.mark.parametrize(
+    ("overrides", "reason"),
+    [
+        ({"_type": "playlist", "entries": []}, "profile"),
+        ({"live_status": "is_live"}, "live"),
+        ({"live_status": "was_live"}, "live"),
+        ({"formats": [{"vcodec": "none"}, {"vcodec": None}]}, "photo"),
+        # Orientation is checked first: the length is not the real problem here.
+        ({"width": 1920, "height": 1080, "duration": 1200}, "horizontal"),
+        ({"width": 1080, "height": 1080}, "horizontal"),
+        ({"duration": 301}, "too long"),
+    ],
+)
+def test_everything_else_is_rejected(overrides: dict, reason: str) -> None:
+    with pytest.raises(Rejected, match=reason):
+        validate("youtube", meta(**overrides))
+
+
+def test_unknown_size_and_length_are_allowed() -> None:
+    validate("tiktok", meta(width=None, height=None, duration=None, formats=[]))
+
+
+# --------------------------------------------------------------------------- #
+#  Errors                                                                     #
+# --------------------------------------------------------------------------- #
+
+
+def test_ytdlp_prefixes_are_stripped() -> None:
+    assert clean_error("ERROR: [TikTok] 7234: Video unavailable") == "Video unavailable"
+    assert clean_error("ERROR: [youtube:tab] abc-1: Private video") == "Private video"
+
+
+@pytest.mark.parametrize(
+    ("message", "kind", "alert"),
+    [
+        ("ERROR: [TikTok] 1: Unexpected response from webpage request", Blocked, True),
+        (
+            "ERROR: [youtube] x: Sign in to confirm you're not a bot. Use --cookies",
+            LoginRequired,
+            True,
+        ),
+        ("ERROR: getaddrinfo failed", DownloadError, False),
+        ("ERROR: Unsupported URL: https://www.tiktok.com/@u/photo/1", Rejected, False),
+        ("ERROR: [youtube] x: Video unavailable", DownloadError, False),
+    ],
+)
+def test_errors_are_mapped_for_chat(message: str, kind: type, alert: bool) -> None:
+    error = user_error(message, TIKTOK)
+    assert type(error) is kind
+    assert error.alert is alert
+    assert "ERROR:" not in error.reason
+
+
+def test_unknown_errors_show_the_reason() -> None:
+    error = user_error("ERROR: [youtube] x: Video unavailable", YOUTUBE)
+    assert "<code>Video unavailable</code>" in error.text
+
+
+# --------------------------------------------------------------------------- #
+#  Extraction retries                                                         #
+# --------------------------------------------------------------------------- #
+
+
+def fake_ydl_factory(monkeypatch, outcomes: list, targets=("chrome-146", "chrome-142")):
+    """Each constructed YoutubeDL returns the next outcome from `extract_info`."""
+    opened: list[tuple[str, ...]] = []
+    monkeypatch.setattr(download, "impersonate_targets", lambda: tuple(targets))
+    monkeypatch.setattr(download.time, "sleep", lambda _: None)
+
+    def factory(opts, *, targets=()):
+        opened.append(targets)
+        ydl = MagicMock()
+        outcome = outcomes.pop(0)
+        if isinstance(outcome, Exception):
+            ydl.extract_info.side_effect = outcome
+        else:
+            ydl.extract_info.return_value = outcome
+        return ydl
+
+    monkeypatch.setattr(download, "_YoutubeDL", factory)
+    return opened
+
+
+def blocked() -> yt_dlp.utils.DownloadError:
+    return yt_dlp.utils.DownloadError("ERROR: [TikTok] 1: Unexpected response from webpage request")
+
+
+def test_network_errors_are_retried(monkeypatch) -> None:
+    fake_ydl_factory(
+        monkeypatch, [yt_dlp.utils.DownloadError("Connection reset by peer"), {"id": 1}]
+    )
+    _, info = download._extract(TIKTOK, {})
+    assert info == {"id": 1}
+
+
+def test_network_retries_give_up(monkeypatch) -> None:
+    errors = [yt_dlp.utils.DownloadError("Read timed out") for _ in range(download.RETRIES)]
+    fake_ydl_factory(monkeypatch, errors)
+    with pytest.raises(DownloadError) as caught:
+        download._extract(TIKTOK, {})
+    assert caught.value.text == download.texts.NETWORK
+
+
+def test_permanent_errors_are_not_retried(monkeypatch) -> None:
+    opened = fake_ydl_factory(monkeypatch, [yt_dlp.utils.DownloadError("Video unavailable")])
+    with pytest.raises(DownloadError):
+        download._extract(TIKTOK, {})
+    assert len(opened) == 1
+
+
+def test_blocked_target_is_swapped_for_the_next(monkeypatch) -> None:
+    opened = fake_ydl_factory(monkeypatch, [blocked(), {"id": 1}])
+    download._extract(TIKTOK, {})
+    assert opened == [("chrome-146", "chrome-142"), ("chrome-142",)]
+
+
+def test_block_is_reported_when_targets_run_out(monkeypatch) -> None:
+    fake_ydl_factory(monkeypatch, [blocked(), blocked()])
+    with pytest.raises(Blocked):
+        download._extract(TIKTOK, {})
+
+
+def test_any_target_request_uses_our_preferences() -> None:
+    with download._YoutubeDL({"quiet": True}, targets=("chrome-131", "firefox-144")) as ydl:
+        _, requested = ydl._parse_impersonate_targets(True)
+        _, explicit = ydl._parse_impersonate_targets("safari-18.4")
+    assert [str(t) for t in requested] == ["chrome-131", "firefox-144"]
+    assert [str(t) for t in explicit] == ["safari-18.4"]
+
+
+# --------------------------------------------------------------------------- #
+#  Audio probe                                                                #
+# --------------------------------------------------------------------------- #
+
+
+@pytest.mark.parametrize(
+    ("stdout", "expected"),
+    [
+        ('{"streams":[{"codec_type":"video"},{"codec_type":"audio"}]}', True),
+        ('{"streams":[{"codec_type":"video"}]}', False),
+        ("not json", None),  # None ≠ False: without ffprobe we cannot say there is no sound
+    ],
+)
+def test_audio_probe(monkeypatch, stdout: str, expected) -> None:
+    monkeypatch.setattr(download.subprocess, "run", lambda *a, **k: SimpleNamespace(stdout=stdout))
+    assert download.has_audio(Path("video.mp4")) is expected
+
+
+def test_missing_ffprobe_is_inconclusive(monkeypatch) -> None:
+    def missing(*args, **kwargs):
+        raise FileNotFoundError("ffprobe")
+
+    monkeypatch.setattr(download.subprocess, "run", missing)
+    assert download.has_audio(Path("video.mp4")) is None
+
+
+# --------------------------------------------------------------------------- #
+#  download_video                                                             #
+# --------------------------------------------------------------------------- #
+
+
+class FakeYDL:
+    """Stands in for the YoutubeDL `_extract` returns; "downloads" a file of `payload`."""
+
+    def __init__(self, opts: dict, payload: bytes | None) -> None:
+        self.opts = opts
+        self.payload = payload
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc) -> None:
+        pass
+
+    def process_ie_result(self, info: dict, download: bool) -> None:
+        if self.payload is not None:
+            Path(self.opts["outtmpl"].replace("%(ext)s", "mp4")).write_bytes(self.payload)
+
+
+@pytest.fixture
+def run(monkeypatch):
+    def run_download(url=YOUTUBE, *, info=None, payload=b"video", audio=True, **kwargs):
+        seen: dict = {}
+
+        def fake_extract(_url, opts):
+            seen["opts"] = opts
+            return FakeYDL(opts, payload), info or meta()
+
+        monkeypatch.setattr(download, "_extract", fake_extract)
+        monkeypatch.setattr(download, "has_audio", lambda path: audio)
+        return download_video(url, **kwargs), seen
+
+    return run_download
+
+
+def test_successful_download(run) -> None:
+    infos = []
+    result, _ = run(info=meta(title="Кот"), on_info=infos.append)
+
+    assert result.path.read_bytes() == b"video"
+    assert result.size_bytes == 5
+    assert result.info.title == "Кот" and result.info.platform == "youtube"
+    assert infos == [result.info]
+    result.cleanup()
+    assert not result.path.parent.exists()
+
+
+def test_platform_cookies_are_used(run) -> None:
+    settings.cookies_dir.mkdir()
+    (settings.cookies_dir / "tiktok.txt").write_text(".tiktok.com\tTRUE\t/\tTRUE\t0\ta\tb\n")
+
+    result, seen = run(TIKTOK)
+
+    assert Path(seen["opts"]["cookiefile"]).parent == settings.cookies_dir
+    result.cleanup()
+
+
+def workdirs() -> set[str]:
+    return {p.name for p in Path(tempfile.gettempdir()).glob("sbahelper-*")}
+
+
+@pytest.mark.parametrize(
+    ("kwargs", "error"),
+    [
+        ({"info": meta(width=1920, height=1080)}, Rejected),
+        ({"payload": None}, DownloadError),
+        ({"url": TIKTOK, "audio": False}, DownloadError),
+    ],
+)
+def test_failures_leave_no_files(run, kwargs: dict, error: type) -> None:
+    before = workdirs()
+    with pytest.raises(error):
+        run(**kwargs)
+    assert workdirs() == before
+
+
+def test_oversized_file_is_rejected(run, monkeypatch) -> None:
+    monkeypatch.setattr(settings, "max_file_size_mb", 1)
+    with pytest.raises(Rejected, match=r"too big 2\.0MB"):
+        run(payload=b"x" * 2 * 1024 * 1024)
+
+
+def test_silent_youtube_video_is_fine(run) -> None:
+    # Only TikTok produces silent merges; YouTube videos may legitimately be silent.
+    result, _ = run(audio=False)
+    result.cleanup()

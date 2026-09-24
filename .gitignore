@@ -1,11 +1,9 @@
 .env
 .env.*
 !.env.example
+.venv/
 __pycache__/
 *.py[cod]
-*.sqlite3
-downloader/cookies/*
-!downloader/cookies/.gitkeep
 data/
 .ruff_cache/
 .pytest_cache/

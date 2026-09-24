@@ -1,29 +1,31 @@
-FROM node:24-bookworm-slim
+# Build the virtualenv with uv; only the venv reaches the final image.
+FROM python:3.14-slim AS build
+COPY --from=ghcr.io/astral-sh/uv:0.12 /uv /usr/local/bin/uv
+ENV UV_COMPILE_BYTECODE=1 \
+    UV_LINK_MODE=copy \
+    UV_PYTHON_DOWNLOADS=never \
+    UV_PROJECT_ENVIRONMENT=/opt/venv
+RUN --mount=type=cache,target=/root/.cache/uv \
+    --mount=type=bind,source=uv.lock,target=uv.lock \
+    --mount=type=bind,source=pyproject.toml,target=pyproject.toml \
+    uv sync --locked --no-dev --no-install-project
+
+FROM python:3.14-slim
 
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends \
-        ca-certificates \
-        ffmpeg \
-        python3 \
-        python3-pip \
-        python3-venv \
-        tzdata \
+    && apt-get install -y --no-install-recommends ffmpeg tzdata \
     && rm -rf /var/lib/apt/lists/*
 
-ENV TZ=Europe/Tallinn
-ENV PYTHONUNBUFFERED=1
-ENV VIRTUAL_ENV=/opt/venv
-ENV PATH="/opt/venv/bin:$PATH"
+# yt-dlp needs a JavaScript runtime for YouTube and picks deno up automatically.
+COPY --from=denoland/deno:bin-2.9.7 /deno /usr/local/bin/deno
+COPY --from=build /opt/venv /opt/venv
+
+ENV TZ=Europe/Tallinn \
+    PYTHONUNBUFFERED=1 \
+    PATH="/opt/venv/bin:$PATH"
 
 WORKDIR /app
+COPY sbahelper ./sbahelper
 
-RUN python3 -m venv "$VIRTUAL_ENV"
-
-COPY requirements.txt .
-RUN python -m pip install --upgrade pip \
-    && python -m pip install --no-cache-dir -r requirements.txt
-
-COPY shared.py ./
-COPY downloader ./downloader
-
-CMD ["python", "-m", "downloader.bot"]
+VOLUME /data
+CMD ["python", "-m", "sbahelper"]

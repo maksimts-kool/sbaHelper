@@ -1,48 +1,13 @@
+# Local development: builds from source and keeps state in ./data
+# (stats database and ./data/cookies). Copy .env.example to .env first.
+# Production runs docker-compose.portainer.yml instead.
 services:
   downloader-bot:
     build: .
-    # image: ghcr.io/<owner>/sbahelper:latest   # set for Watchtower auto-updates
     container_name: downloader-bot
     restart: unless-stopped
-    environment:
-      DOWNLOADER_BOT_TOKEN: "${DOWNLOADER_BOT_TOKEN:-}"
-      LOG_LEVEL: "${LOG_LEVEL:-INFO}"
-      SENTRY_DSN: "${SENTRY_DSN:-}"
-      SENTRY_ENVIRONMENT: "${SENTRY_ENVIRONMENT:-production}"
-      SENTRY_RELEASE: "${SENTRY_RELEASE:-}"
-      ALLOWED_CHAT_IDS: "${ALLOWED_CHAT_IDS:-}"
-
-      MAX_FILE_SIZE_MB: "${MAX_FILE_SIZE_MB:-50}"
-      MAX_DURATION_SEC: "${MAX_DURATION_SEC:-600}"
-      MAX_SHORT_DURATION_SEC: "${MAX_SHORT_DURATION_SEC:-300}"
-      DOWNLOAD_DIR: "${DOWNLOAD_DIR:-/tmp/downloader_videos}"
-      COOKIES_FILE: "${COOKIES_FILE:-/app/cookies/cookies.txt}"
-      YOUTUBE_COOKIES_FILE: "${YOUTUBE_COOKIES_FILE:-}"
-      CHECK_YOUTUBE_URL: "${CHECK_YOUTUBE_URL:-}"
-      CHECK_TIKTOK_URL: "${CHECK_TIKTOK_URL:-}"
-      STARTUP_CHECK_DOWNLOAD: "${STARTUP_CHECK_DOWNLOAD:-1}"
-      STARTUP_CHECKS_REQUIRED: "${STARTUP_CHECKS_REQUIRED:-1}"
-
-      # Повтор упавшей загрузки: одна попытка через N секунд, 0 — выключить.
-      RETRY_DELAY_SEC: "${RETRY_DELAY_SEC:-120}"
-      # Файл состояния PTB: в нём отложенный повтор переживает перезапуск.
-      BOT_STATE_PATH: "${BOT_STATE_PATH:-/data/downloader_state.pickle}"
-
-      STATS_ENABLED: "${STATS_ENABLED:-1}"
-      STATS_DB_PATH: "${STATS_DB_PATH:-/data/downloader_stats.db}"
-      STATS_TIMEZONE: "${STATS_TIMEZONE:-Europe/Tallinn}"
-      STATS_WEEKLY_WEEKDAY: "${STATS_WEEKLY_WEEKDAY:-6}"   # 0 = понедельник, 6 = воскресенье
-      STATS_WEEKLY_TIME: "${STATS_WEEKLY_TIME:-20:00}"
-      STATS_RETENTION_DAYS: "${STATS_RETENTION_DAYS:-400}"
+    env_file:
+      - path: .env
+        required: false
     volumes:
-      - ./downloader/cookies:/app/cookies
-      - ./data:/data                 # SQLite со статистикой загрузок
-      - /tmp/downloader_videos:/tmp/downloader_videos
-    labels: ["com.centurylinklabs.watchtower.enable=true"]
-
-  watchtower:                        # opt-in: `docker compose --profile watchtower up -d`
-    image: nickfedor/watchtower
-    restart: unless-stopped
-    profiles: ["watchtower"]
-    volumes: ["/var/run/docker.sock:/var/run/docker.sock"]
-    command: --cleanup --label-enable --interval 3600
+      - ./data:/data

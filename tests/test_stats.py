@@ -1,282 +1,138 @@
-"""Журнал загрузок и недельная агрегация — `downloader/stats.py`."""
-
 import sqlite3
-import tempfile
-import unittest
-from datetime import datetime, timedelta, timezone
+from contextlib import closing
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
-from downloader.stats import (
-    DownloadEvent,
-    StatsStore,
-    aggregate_weekly_stats,
-    empty_weekly_stats,
-    has_visible_text,
-    resolve_timezone,
-    sunday_based_weekday,
-    week_period,
-)
+import pytest
 
-UTC = timezone.utc
+from sbahelper.stats import DownloadEvent, StatsStore, aggregate, week_period
 
-# Имя из невидимых символов: NBSP, HANGUL FILLER и VARIATION SELECTOR-15.
-# Такие ставят, чтобы висеть первым в списке участников группы.
-INVISIBLE_NAME = "\xa0\u3164 \ufe0e \ufe0e\xa0"
+START, END = datetime(2026, 7, 20, tzinfo=UTC), datetime(2026, 7, 27, tzinfo=UTC)
 
 
-def row(
-    user_id: int,
-    user_name: str,
-    platform: str = "tiktok",
-    duration_sec: int = 60,
-    size_bytes: int = 1024 * 1024,
-    title: str = "Видео",
-    uploader: str = "author",
-    view_count: int | None = None,
-    username: str | None = None,
-) -> tuple:
-    return (
-        user_id,
-        user_name,
-        username,
-        platform,
-        duration_sec,
-        size_bytes,
-        title,
-        uploader,
-        view_count,
-    )
+def row(user_id, name, platform="tiktok", duration=60, size=1024**2, views=None, username=None):
+    return (user_id, name, username, platform, duration, size, "Видео", "author", views)
 
 
-class WeekPeriodTests(unittest.TestCase):
-    def test_period_starts_on_monday_midnight(self):
-        # Воскресенье 20:00.
-        now = datetime(2026, 7, 26, 20, 0, tzinfo=UTC)
-        start, end = week_period(now)
-        self.assertEqual(start, datetime(2026, 7, 20, 0, 0, tzinfo=UTC))
-        self.assertEqual(end, now)
-
-    def test_monday_period_starts_the_same_day(self):
-        now = datetime(2026, 7, 20, 9, 30, tzinfo=UTC)
-        start, _ = week_period(now)
-        self.assertEqual(start, datetime(2026, 7, 20, 0, 0, tzinfo=UTC))
-
-    def test_sunday_based_weekday_matches_job_queue(self):
-        # JobQueue считает 0 = воскресенье, datetime.weekday() — 0 = понедельник.
-        self.assertEqual(sunday_based_weekday(6), 0)
-        self.assertEqual(sunday_based_weekday(0), 1)
-        self.assertEqual(sunday_based_weekday(5), 6)
-
-    def test_unknown_timezone_falls_back_to_utc(self):
-        self.assertEqual(resolve_timezone("Nowhere/Nothing"), UTC)
+def stats(rows):
+    return aggregate(rows, period_start=START, period_end=END)
 
 
-class VisibleTextTests(unittest.TestCase):
-    def test_ordinary_names_are_visible(self):
-        for name in ("Максим", "A", "@nick", "  Аня  ", "3"):
-            with self.subTest(name=name):
-                self.assertTrue(has_visible_text(name))
-
-    def test_blank_and_invisible_names_are_not(self):
-        for name in ("", " ", INVISIBLE_NAME, "\u200b\u2060", "\u2800\u2800"):
-            with self.subTest(name=repr(name)):
-                self.assertFalse(has_visible_text(name))
-
-    def test_visible_character_next_to_invisible_ones_still_counts(self):
-        self.assertTrue(has_visible_text(INVISIBLE_NAME + "я"))
+def test_week_starts_on_monday_midnight() -> None:
+    sunday = datetime(2026, 7, 26, 20, tzinfo=UTC)
+    assert week_period(sunday) == (START, sunday)
+    monday = datetime(2026, 7, 20, 9, 30, tzinfo=UTC)
+    assert week_period(monday)[0] == START
 
 
-class AggregateTests(unittest.TestCase):
-    def setUp(self):
-        self.start = datetime(2026, 7, 20, tzinfo=UTC)
-        self.end = datetime(2026, 7, 26, 20, 0, tzinfo=UTC)
-
-    def aggregate(self, rows):
-        return aggregate_weekly_stats(rows, period_start=self.start, period_end=self.end)
-
-    def test_totals_and_ranking(self):
-        rows = [
-            *[row(1, "Максим", duration_sec=30, size_bytes=1_000_000)] * 3,
-            *[row(2, "Аня", platform="youtube", duration_sec=60, size_bytes=2_000_000)] * 2,
-            row(3, "Пётр", platform="other", duration_sec=90, size_bytes=3_000_000),
+def test_totals_and_ranking() -> None:
+    result = stats(
+        [
+            *[row(1, "Максим", duration=30, size=1_000_000)] * 3,
+            *[row(2, "Аня", platform="youtube", duration=60, size=2_000_000)] * 2,
+            row(3, "Пётр", duration=90, size=3_000_000),
         ]
-        stats = self.aggregate(rows)
+    )
+    assert result.total_downloads == 6
+    assert result.total_duration_sec == 3 * 30 + 2 * 60 + 90
+    assert result.total_size_bytes == 10_000_000
+    assert [(t.name, t.downloads) for t in result.top_users] == [
+        ("Максим", 3),
+        ("Аня", 2),
+        ("Пётр", 1),
+    ]
+    assert [(p.platform, p.downloads) for p in result.platforms] == [("tiktok", 4), ("youtube", 2)]
 
-        self.assertEqual(stats.total_downloads, 6)
-        self.assertEqual(stats.total_duration_sec, 3 * 30 + 2 * 60 + 90)
-        self.assertEqual(stats.total_size_bytes, 3_000_000 + 4_000_000 + 3_000_000)
-        self.assertEqual(
-            [(tally.name, tally.downloads) for tally in stats.top_users],
-            [("Максим", 3), ("Аня", 2), ("Пётр", 1)],
-        )
-        self.assertEqual(stats.other_users, 0)
-        self.assertEqual(
-            [(tally.platform, tally.downloads) for tally in stats.platforms],
-            [("tiktok", 3), ("youtube", 2), ("other", 1)],
-        )
 
-    def test_users_beyond_the_top_are_collapsed(self):
-        rows = [
+def test_people_beyond_the_top_are_folded() -> None:
+    result = stats(
+        [
             *[row(1, "A")] * 5,
             *[row(2, "B")] * 4,
             *[row(3, "C")] * 3,
             *[row(4, "D")] * 2,
             row(5, "E"),
         ]
-        stats = self.aggregate(rows)
-
-        self.assertEqual([tally.name for tally in stats.top_users], ["A", "B", "C"])
-        self.assertEqual(stats.other_users, 2)
-        self.assertEqual(stats.other_downloads, 3)
-
-    def test_latest_name_wins_for_the_same_user(self):
-        stats = self.aggregate([row(1, "Старое имя"), row(1, "Новое имя")])
-        self.assertEqual(stats.top_users[0].name, "Новое имя")
-
-    def test_invisible_name_falls_back_to_the_user_id(self):
-        # Имя из невидимых символов не должно давать пустую строку в топе.
-        stats = self.aggregate([row(1083346705, INVISIBLE_NAME)])
-        self.assertEqual(stats.top_users[0].name, "Участник 1083346705")
-
-    def test_invisible_name_without_user_id_falls_back_to_unknown(self):
-        stats = self.aggregate([row(0, INVISIBLE_NAME)])
-        self.assertEqual(stats.top_users[0].name, "Неизвестно")
-
-    def test_equal_counts_are_ordered_by_name(self):
-        stats = self.aggregate([row(2, "Яна"), row(1, "Артём")])
-        self.assertEqual([tally.name for tally in stats.top_users], ["Артём", "Яна"])
-
-    def test_top_video_is_the_most_viewed(self):
-        rows = [
-            row(1, "A", title="Мало", view_count=10),
-            row(1, "A", title="Много", view_count=2_400_000),
-            row(2, "B", title="Без счётчика", view_count=None),
-        ]
-        stats = self.aggregate(rows)
-
-        self.assertIsNotNone(stats.top_video)
-        self.assertEqual(stats.top_video.title, "Много")
-        self.assertEqual(stats.top_video.view_count, 2_400_000)
-
-    def test_no_top_video_without_view_counts(self):
-        stats = self.aggregate([row(1, "A", view_count=None)])
-        self.assertIsNone(stats.top_video)
-
-    def test_empty_period(self):
-        stats = empty_weekly_stats(self.start, self.end)
-        self.assertEqual(stats.total_downloads, 0)
-        self.assertEqual(stats.top_users, ())
-        self.assertEqual(stats.platforms, ())
-        self.assertIsNone(stats.top_video)
+    )
+    assert [t.name for t in result.top_users] == ["A", "B", "C"]
+    assert (result.other_users, result.other_downloads) == (2, 3)
 
 
-class StatsStoreTests(unittest.TestCase):
-    def setUp(self):
-        self._tempdir = tempfile.TemporaryDirectory()
-        self.addCleanup(self._tempdir.cleanup)
-        self.path = str(Path(self._tempdir.name) / "nested" / "stats.db")
-        self.store = StatsStore(self.path)
-        self.start = datetime(2026, 7, 20, tzinfo=UTC)
-        self.end = datetime(2026, 7, 27, tzinfo=UTC)
+def test_latest_name_and_known_username_win() -> None:
+    result = stats([row(1, "Old", username="nick"), row(1, "New")])
+    assert (result.top_users[0].name, result.top_users[0].username) == ("New", "nick")
 
-    def record(self, chat_id: int, user_id: int, name: str, at: datetime, **kwargs) -> None:
-        event = DownloadEvent(
-            chat_id=chat_id,
-            user_id=user_id,
-            user_name=name,
-            username=kwargs.pop("username", None),
-            platform="tiktok",
-            **kwargs,
+
+def test_ties_are_ordered_by_name() -> None:
+    assert [t.name for t in stats([row(2, "Яна"), row(1, "Артём")]).top_users] == ["Артём", "Яна"]
+
+
+def test_top_video_is_the_most_viewed() -> None:
+    result = stats([row(1, "A", views=10), row(1, "A", views=2_400_000), row(2, "B")])
+    assert result.top_video is not None and result.top_video.view_count == 2_400_000
+    assert stats([row(1, "A")]).top_video is None
+
+
+# --------------------------------------------------------------------------- #
+#  Store                                                                      #
+# --------------------------------------------------------------------------- #
+
+
+@pytest.fixture
+def store(tmp_path: Path) -> StatsStore:
+    return StatsStore(tmp_path / "nested" / "stats.db")
+
+
+def record(store: StatsStore, chat_id: int, at: datetime, user_id: int = 1, **kwargs) -> None:
+    event = DownloadEvent(
+        chat_id, user_id, kwargs.pop("name", "A"), kwargs.pop("username", None), "tiktok", **kwargs
+    )
+    store.record(event, at=at)
+
+
+def test_rows_survive_reopening(tmp_path: Path) -> None:
+    record(StatsStore(tmp_path / "s.db"), -100, datetime(2026, 7, 21, tzinfo=UTC), username="nick")
+    reopened = StatsStore(tmp_path / "s.db").weekly_stats(chat_id=-100, start=START, end=END)
+    assert reopened.total_downloads == 1
+    assert reopened.top_users[0].username == "nick"
+
+
+def test_stats_are_per_chat_and_per_period(store: StatsStore) -> None:
+    record(store, -100, START)
+    record(store, -100, START - timedelta(seconds=1))
+    record(store, -100, END)  # the end is exclusive
+    record(store, -200, datetime(2026, 7, 22, 12))  # naive timestamps are UTC
+
+    assert store.weekly_stats(chat_id=-100, start=START, end=END).total_downloads == 1
+    assert store.weekly_stats(chat_id=-200, start=START, end=END).total_downloads == 1
+    assert store.active_chat_ids(START, END) == [-200, -100]
+
+
+def test_prune_removes_only_old_rows(store: StatsStore) -> None:
+    record(store, -100, datetime(2026, 1, 1, tzinfo=UTC))
+    record(store, -100, datetime(2026, 7, 21, tzinfo=UTC))
+
+    assert store.prune(older_than=datetime(2026, 6, 1, tzinfo=UTC)) == 1
+    assert store.weekly_stats(chat_id=-100, start=START, end=END).total_downloads == 1
+
+
+def test_old_database_gets_the_username_column(tmp_path: Path) -> None:
+    path = tmp_path / "legacy.db"
+    with closing(sqlite3.connect(path)) as conn, conn:
+        conn.execute(
+            "CREATE TABLE downloads (id INTEGER PRIMARY KEY AUTOINCREMENT, "
+            "created_at TEXT NOT NULL, chat_id INTEGER NOT NULL, user_id INTEGER NOT NULL, "
+            "user_name TEXT NOT NULL, platform TEXT NOT NULL, duration_sec INTEGER NOT NULL, "
+            "size_bytes INTEGER NOT NULL, title TEXT NOT NULL, uploader TEXT NOT NULL, "
+            "view_count INTEGER)"
         )
-        self.store.record(event, at=at)
-
-    def test_creates_missing_directories(self):
-        self.assertTrue(Path(self.path).exists())
-
-    def test_reopening_keeps_existing_rows(self):
-        self.record(-100, 1, "A", datetime(2026, 7, 21, 12, tzinfo=UTC))
-        reopened = StatsStore(self.path)
-        stats = reopened.weekly_stats(chat_id=-100, start=self.start, end=self.end)
-        self.assertEqual(stats.total_downloads, 1)
-
-    def test_stats_are_scoped_to_one_chat(self):
-        self.record(-100, 1, "A", datetime(2026, 7, 21, 12, tzinfo=UTC))
-        self.record(-100, 1, "A", datetime(2026, 7, 22, 12, tzinfo=UTC))
-        self.record(-200, 2, "B", datetime(2026, 7, 22, 12, tzinfo=UTC))
-
-        self.assertEqual(
-            self.store.weekly_stats(chat_id=-100, start=self.start, end=self.end).total_downloads, 2
-        )
-        self.assertEqual(
-            self.store.weekly_stats(chat_id=-200, start=self.start, end=self.end).total_downloads, 1
+        conn.execute(
+            "INSERT INTO downloads (created_at, chat_id, user_id, user_name, platform, "
+            "duration_sec, size_bytes, title, uploader, view_count) VALUES "
+            "('2026-07-21T12:00:00+00:00', -100, 1, 'Максим', 'tiktok', 60, 1024, 'В', 'a', 5)"
         )
 
-    def test_rows_outside_the_period_are_ignored(self):
-        self.record(-100, 1, "A", self.start - timedelta(seconds=1))
-        self.record(-100, 1, "A", self.end)
-        self.record(-100, 1, "A", self.start)
+    result = StatsStore(path).weekly_stats(chat_id=-100, start=START, end=END)
 
-        stats = self.store.weekly_stats(chat_id=-100, start=self.start, end=self.end)
-        self.assertEqual(stats.total_downloads, 1)
-
-    def test_active_chat_ids_lists_only_chats_with_downloads(self):
-        self.record(-100, 1, "A", datetime(2026, 7, 21, 12, tzinfo=UTC))
-        self.record(-200, 2, "B", datetime(2026, 7, 22, 12, tzinfo=UTC))
-        self.record(-300, 3, "C", self.start - timedelta(days=30))
-
-        self.assertEqual(self.store.active_chat_ids(self.start, self.end), [-200, -100])
-
-    def test_naive_timestamps_are_treated_as_utc(self):
-        self.record(-100, 1, "A", datetime(2026, 7, 21, 12))
-        stats = self.store.weekly_stats(chat_id=-100, start=self.start, end=self.end)
-        self.assertEqual(stats.total_downloads, 1)
-
-    def test_username_survives_a_round_trip(self):
-        self.record(-100, 1, "Максим", datetime(2026, 7, 21, 12, tzinfo=UTC), username="maksim")
-
-        stats = self.store.weekly_stats(chat_id=-100, start=self.start, end=self.end)
-
-        self.assertEqual(stats.top_users[0].username, "maksim")
-
-    def test_username_column_is_added_to_an_older_database(self):
-        legacy_path = str(Path(self._tempdir.name) / "legacy.db")
-        # `sqlite3.connect` как контекст-менеджер только коммитит; на Windows
-        # незакрытый файл потом не даёт убрать временный каталог.
-        conn = sqlite3.connect(legacy_path)
-        with conn:
-            conn.execute(
-                "CREATE TABLE downloads (id INTEGER PRIMARY KEY AUTOINCREMENT, "
-                "created_at TEXT NOT NULL, chat_id INTEGER NOT NULL, user_id INTEGER NOT NULL, "
-                "user_name TEXT NOT NULL, platform TEXT NOT NULL, duration_sec INTEGER NOT NULL, "
-                "size_bytes INTEGER NOT NULL, title TEXT NOT NULL, uploader TEXT NOT NULL, "
-                "view_count INTEGER)"
-            )
-            conn.execute(
-                "INSERT INTO downloads (created_at, chat_id, user_id, user_name, platform, "
-                "duration_sec, size_bytes, title, uploader, view_count) VALUES "
-                "('2026-07-21T12:00:00+00:00', -100, 1, 'Максим', 'tiktok', 60, 1024, 'В', 'a', 5)"
-            )
-        conn.close()
-
-        legacy = StatsStore(legacy_path)
-        stats = legacy.weekly_stats(chat_id=-100, start=self.start, end=self.end)
-
-        # Старая строка читается, просто без упоминания.
-        self.assertEqual(stats.total_downloads, 1)
-        self.assertEqual(stats.top_users[0].name, "Максим")
-        self.assertIsNone(stats.top_users[0].username)
-
-    def test_prune_removes_only_old_rows(self):
-        self.record(-100, 1, "A", datetime(2026, 1, 1, tzinfo=UTC))
-        self.record(-100, 1, "A", datetime(2026, 7, 21, tzinfo=UTC))
-
-        removed = self.store.prune(older_than=datetime(2026, 6, 1, tzinfo=UTC))
-
-        self.assertEqual(removed, 1)
-        self.assertEqual(
-            self.store.weekly_stats(chat_id=-100, start=self.start, end=self.end).total_downloads, 1
-        )
-
-
-if __name__ == "__main__":
-    unittest.main()
+    assert result.total_downloads == 1
+    assert (result.top_users[0].name, result.top_users[0].username) == ("Максим", None)
