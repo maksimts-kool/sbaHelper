@@ -1,4 +1,4 @@
-"""Scheduled jobs: the weekly summary, the cookie expiry reminder, startup checks."""
+"""Scheduled jobs: weekly summary, cookie expiry reminder and refresh, startup checks."""
 
 from __future__ import annotations
 
@@ -13,6 +13,7 @@ from telegram.ext import Application, ContextTypes
 from sbahelper import cookies, texts
 from sbahelper.checks import run_checks
 from sbahelper.config import settings
+from sbahelper.download import DownloadError, LoginRequired, refresh
 from sbahelper.handlers import STATS_KEY, is_allowed, stats_store
 from sbahelper.stats import week_period
 
@@ -79,6 +80,33 @@ async def check_cookie_expiry(context: ContextTypes.DEFAULT_TYPE) -> None:
         )
 
 
+def refresh_cookies_now() -> None:
+    """Visit each CHECK_*_URL with its platform's cookies so the session stays in use."""
+    for platform, url in settings.check_urls.items():
+        if not url or not cookies.platform_file(settings.cookies_dir, platform).is_file():
+            continue
+        try:
+            refresh(url)
+        except LoginRequired as error:
+            log.error(
+                "Cookies rejected: the site asks to log in. Platform=%s Error=%s. "
+                "Send fresh cookies to the bot in a private chat.",
+                platform,
+                error.reason,
+            )
+        except DownloadError as error:
+            level = logging.ERROR if error.alert else logging.WARNING
+            log.log(level, "Cookies not refreshed. Platform=%s Error=%s", platform, error.reason)
+        except Exception:
+            log.exception("Cookie refresh crashed. Platform=%s", platform)
+        else:
+            log.info("Cookies refreshed. Platform=%s", platform)
+
+
+async def refresh_cookies(context: ContextTypes.DEFAULT_TYPE) -> None:
+    await asyncio.to_thread(refresh_cookies_now)
+
+
 async def run_startup_checks(context: ContextTypes.DEFAULT_TYPE) -> None:
     await asyncio.to_thread(run_checks)
 
@@ -106,3 +134,7 @@ def schedule(app: Application) -> None:
     )
     if any(settings.check_urls.values()):
         jobs.run_once(run_startup_checks, STARTUP_CHECK_DELAY_SEC, name="startup-checks")
+        if hours := settings.cookies_refresh_hours:
+            interval = timedelta(hours=hours)
+            jobs.run_repeating(refresh_cookies, interval, first=interval, name="cookie-refresh")
+            log.info("Cookie refresh scheduled. Every=%dh", hours)

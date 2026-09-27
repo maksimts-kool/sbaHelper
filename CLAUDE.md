@@ -45,7 +45,7 @@ sbahelper/
   stats.py      SQLite StatsStore + weekly aggregate(); pure data, no Telegram
   texts.py      EVERY user-facing string and renderer (captions, status, weekly summary, admin)
   handlers.py   Telegram handlers: links, /start, /stats, /cookies, /check, cookie upload, errors
-  jobs.py       JobQueue jobs: weekly summary, daily cookie-expiry check, startup checks
+  jobs.py       JobQueue jobs: weekly summary, cookie expiry check + refresh, startup checks
 tests/          pytest, one file per module; conftest.py resets `settings` for every test
 ```
 
@@ -111,12 +111,24 @@ Format (see `log.py`): `2026-09-23T00:07:06+03:00 [DOWNLOAD] INFO: Downloaded. P
   is deleted afterwards), or any other `*.txt`/`*.json` in the folder is imported on startup
   (`import_dropped`) and renamed `*.imported`. Formats: Netscape and Cookie-Editor /
   EditThisCookie JSON. An import **replaces** that platform's file.
-- `cookies.session()` hands yt-dlp a private copy and `os.replace`s it back after a successful
-  run, so refreshed cookies persist. It skips the swap if the file changed meanwhile (new
-  upload). Never point yt-dlp at the real file: yt-dlp rewrites its cookie file in place on
-  close, which is not safe with parallel downloads.
+- `cookies.session()` hands yt-dlp a private copy. yt-dlp saves the jar on close, failed runs
+  included, and `_merge_back` merges only what that run added/changed/dropped into the real
+  file under `cookies._lock`. Sites rotate session cookies on almost every request (YouTube's
+  `__Secure-*PSIDTS` go stale within hours), so losing a rotation (failed or rejected link,
+  parallel runs overwriting each other) kills the session. Imports bump
+  `cookies._generation`; a run that started on older cookies merges nothing. Never point
+  yt-dlp at the real file: it rewrites its cookie file in place on close.
+- `cookies.record()` / `health()` keep the site's last verdict per platform (accepted, or
+  `LoginRequired`), set by `download._extract_recorded` when cookies were sent. In memory
+  only, reset by an import. `/cookies` shows it because the expiry dates in the file say
+  nothing about whether YouTube still accepts the session.
+- `jobs.refresh_cookies` opens each `CHECK_*_URL` (metadata only, `download.refresh`) every
+  `COOKIES_REFRESH_HOURS` so the session keeps rotating; a login request there is an ERROR.
 - `cookies.status()` reads login cookies (`LOGIN_COOKIES`) for `/cookies`, the startup log and
   the daily `jobs.check_cookie_expiry` (ERROR → alert when <3 days left or expired).
+- YouTube cookies must come from a private window that is closed right after the export
+  (instructions in `texts.COOKIES_HINT` and README); a browser that keeps using the session
+  rotates it and YouTube revokes the bot's copy within hours.
 
 ## yt-dlp specifics (read before touching download.py)
 
@@ -179,6 +191,7 @@ Portainer, and to `tests/conftest.py` if tests depend on it.
 | `MAX_SHORT_DURATION_SEC` | 300 | |
 | `COOKIES_DIR` | /data/cookies | |
 | `CHECK_TIKTOK_URL`, `CHECK_YOUTUBE_URL` | empty | smoke-check videos |
+| `COOKIES_REFRESH_HOURS` | 4 | visit CHECK URLs with cookies; 0 = off |
 | `STATS_ENABLED` | 1 | |
 | `STATS_DB_PATH` | /data/downloader_stats.db | |
 | `STATS_WEEKLY_WEEKDAY` / `STATS_WEEKLY_TIME` | 6 / 20:00 | |

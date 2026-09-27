@@ -91,6 +91,8 @@ class Settings:
     cookies_dir: Path
     # Platform → a known-good video the startup check downloads. Empty URLs are skipped.
     check_urls: dict[str, str]
+    # Open the CHECK_*_URL pages with the cookies this often to keep the session fresh; 0 = off.
+    cookies_refresh_hours: int
     stats_enabled: bool
     stats_db_path: Path
     # `datetime.weekday()` numbering: 0 = Monday … 6 = Sunday.
@@ -118,6 +120,7 @@ class Settings:
                 "tiktok": env.text("CHECK_TIKTOK_URL"),
                 "youtube": env.text("CHECK_YOUTUBE_URL"),
             },
+            cookies_refresh_hours=env.integer("COOKIES_REFRESH_HOURS", 4),
             stats_enabled=env.flag("STATS_ENABLED", True),
             stats_db_path=Path(env.text("STATS_DB_PATH", "/data/downloader_stats.db")),
             stats_weekday=env.integer("STATS_WEEKLY_WEEKDAY", 6, high=6),

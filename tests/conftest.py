@@ -9,6 +9,7 @@ from zoneinfo import ZoneInfo
 
 import pytest
 
+from sbahelper import cookies
 from sbahelper.config import settings
 
 
@@ -22,6 +23,7 @@ def default_settings(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
         "max_duration_sec": 300,
         "cookies_dir": tmp_path / "cookies",
         "check_urls": {"tiktok": "", "youtube": ""},
+        "cookies_refresh_hours": 4,
         "stats_enabled": True,
         "stats_db_path": tmp_path / "stats.db",
         "stats_weekday": 6,
@@ -29,3 +31,6 @@ def default_settings(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
         "stats_retention_days": 400,
     }.items():
         monkeypatch.setattr(settings, name, value)
+    # Cookie health and import generations are process-wide.
+    monkeypatch.setattr(cookies, "_generation", {})
+    monkeypatch.setattr(cookies, "_health", {})

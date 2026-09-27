@@ -196,7 +196,10 @@ def user_label(tally: UserTally) -> str:
 
 COOKIES_HINT = (
     "Чтобы обновить, пришли мне файл cookies: <code>cookies.txt</code> в формате Netscape "
-    "или JSON из расширения Cookie-Editor. Можно один файл сразу со всеми сайтами."
+    "или JSON из расширения Cookie-Editor. Можно один файл сразу со всеми сайтами.\n\n"
+    "<b>YouTube</b>: открой окно инкогнито, войди в аккаунт, перейди на "
+    "<code>youtube.com/robots.txt</code>, выгрузи cookies и сразу закрой окно. Если этот вход "
+    "потом открыть в браузере, YouTube отзовёт cookies за несколько часов. Лучше запасной аккаунт."
 )
 CHECKS_RUNNING = "🔎 Скачиваю тестовые видео…"
 CHECKS_NONE = "Проверки не настроены: задай CHECK_TIKTOK_URL и/или CHECK_YOUTUBE_URL."
@@ -217,7 +220,19 @@ def cookies_status(statuses: list[CookieStatus], now: datetime) -> str:
         elif item.login_expires:
             login = "вход истёк"
         lines.append(f"• <b>{name}</b> — {item.count} шт., {login}")
+        lines.append(f"   {_cookie_health(item, now)}")
     return "\n".join([*lines, "", COOKIES_HINT])
+
+
+def _cookie_health(item: CookieStatus, now: datetime) -> str:
+    """What the site said last time: the expiry date in the file cannot tell."""
+    if item.health is None:
+        return "❔ ещё не проверялись — /check"
+    at = item.health.at.astimezone(now.tzinfo)
+    when = f"{_day_month(at)} в {at:%H:%M}"
+    if item.health.ok:
+        return f"✅ работают, последний раз {when}"
+    return f"❌ сайт просит войти заново ({when}) — пришли свежие cookies"
 
 
 def _days_left(item: CookieStatus, now: datetime) -> str:

@@ -1,5 +1,5 @@
+import http.cookiejar
 import json
-import os
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -166,37 +166,110 @@ def test_session_is_none_without_a_file(tmp_path: Path) -> None:
         assert path is None
 
 
+def ytdlp_run(path: str, **changes: str | None) -> None:
+    """What yt-dlp does to its copy: load it, apply Set-Cookie changes, save on close."""
+    jar = YoutubeDLCookieJar(path)
+    jar.load()
+    for name, value in changes.items():
+        if value is None:
+            jar.clear(".tiktok.com", "/", name)
+            continue
+        jar.set_cookie(
+            http.cookiejar.Cookie(
+                0, name, value, None, False, ".tiktok.com", True, True, "/", True,
+                True, 1893456000, False, None, None, {},
+            )
+        )  # fmt: skip
+    jar.save()
+
+
+def tiktok_values(directory: Path) -> dict[str, str]:
+    return {c.name: c.value for c in cookies.parse((directory / "tiktok.txt").read_text())}
+
+
 def test_session_changes_are_saved_back(tmp_path: Path) -> None:
     cookies.import_text(tmp_path, NETSCAPE)
-    source = tmp_path / "tiktok.txt"
 
     with cookies.session(tmp_path, "tiktok") as path:
-        assert path is not None and Path(path) != source
-        Path(path).write_text("refreshed")
+        assert path is not None and Path(path).parent == tmp_path
+        ytdlp_run(path, sessionid="rotated", new="1")
 
-    assert source.read_text() == "refreshed"
+    assert tiktok_values(tmp_path) == {"sessionid": "rotated", "tt_chain_token": "xyz", "new": "1"}
     assert sorted(p.name for p in tmp_path.iterdir()) == ["tiktok.txt", "youtube.txt"]
+
+
+def test_saved_file_keeps_the_httponly_marker_ytdlp_drops(tmp_path: Path) -> None:
+    cookies.import_text(tmp_path, NETSCAPE)
+
+    with cookies.session(tmp_path, "tiktok") as path:
+        ytdlp_run(path, sessionid="rotated")
+
+    assert (
+        "#HttpOnly_.tiktok.com\tTRUE\t/\tTRUE\t0\ttt_chain_token\txyz"
+        in (tmp_path / "tiktok.txt").read_text()
+    )
+
+
+def test_failed_run_still_saves_rotated_cookies(tmp_path: Path) -> None:
+    # A rejected or failed link still talked to the site, which may have rotated the
+    # session; dropping that rotation leaves a stale session in the file.
+    cookies.import_text(tmp_path, NETSCAPE)
+
+    with pytest.raises(RuntimeError), cookies.session(tmp_path, "tiktok") as path:
+        ytdlp_run(path, sessionid="rotated")
+        raise RuntimeError
+
+    assert tiktok_values(tmp_path)["sessionid"] == "rotated"
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["tiktok.txt", "youtube.txt"]
+
+
+def test_parallel_runs_keep_each_others_changes(tmp_path: Path) -> None:
+    cookies.import_text(tmp_path, NETSCAPE)
+
+    with (
+        cookies.session(tmp_path, "tiktok") as first,
+        cookies.session(tmp_path, "tiktok") as second,
+    ):
+        ytdlp_run(first, sessionid="rotated-by-first")
+        ytdlp_run(second, tt_chain_token=None, other="2")
+
+    assert tiktok_values(tmp_path) == {"sessionid": "rotated-by-first", "other": "2"}
 
 
 def test_session_does_not_overwrite_freshly_uploaded_cookies(tmp_path: Path) -> None:
     cookies.import_text(tmp_path, NETSCAPE)
-    source = tmp_path / "tiktok.txt"
 
     with cookies.session(tmp_path, "tiktok") as path:
-        Path(path).write_text("stale copy")
-        source.write_text("new upload")
-        os.utime(source, ns=(1, 1))
+        ytdlp_run(path, sessionid="old-session")
+        cookies.import_text(tmp_path, ".tiktok.com\tTRUE\t/\tTRUE\t0\tsessionid\tnew-upload\n")
 
-    assert source.read_text() == "new upload"
+    assert tiktok_values(tmp_path) == {"sessionid": "new-upload"}
 
 
-def test_failed_run_keeps_the_original(tmp_path: Path) -> None:
+def test_half_written_copy_is_ignored(tmp_path: Path) -> None:
     cookies.import_text(tmp_path, NETSCAPE)
     original = (tmp_path / "tiktok.txt").read_text()
 
-    with pytest.raises(RuntimeError), cookies.session(tmp_path, "tiktok") as path:
+    with cookies.session(tmp_path, "tiktok") as path:
         Path(path).write_text("half-written")
-        raise RuntimeError
 
     assert (tmp_path / "tiktok.txt").read_text() == original
-    assert sorted(p.name for p in tmp_path.iterdir()) == ["tiktok.txt", "youtube.txt"]
+
+
+# --------------------------------------------------------------------------- #
+#  Health                                                                     #
+# --------------------------------------------------------------------------- #
+
+
+def test_health_is_reported_until_new_cookies_arrive(tmp_path: Path) -> None:
+    cookies.import_text(tmp_path, NETSCAPE)
+    assert cookies.status(tmp_path)[1].health is None
+
+    cookies.record("youtube", False, "Sign in to confirm you're not a bot")
+    youtube = cookies.status(tmp_path)[1]
+    assert youtube.health is not None and not youtube.health.ok
+    assert youtube.logged_in  # the file alone still looks fine
+
+    cookies.record("tiktok", True)
+    cookies.import_text(tmp_path, NETSCAPE)  # a new upload: old results no longer apply
+    assert [item.health for item in cookies.status(tmp_path)] == [None, None]

@@ -419,6 +419,40 @@ def _extract(url: str, opts: dict) -> tuple[yt_dlp.YoutubeDL, dict]:
             time.sleep(delay)
 
 
+def _extract_recorded(
+    url: str, opts: dict, platform: str, cookie_file: str | None
+) -> tuple[yt_dlp.YoutubeDL, dict]:
+    """`_extract`, remembering whether the site accepted our cookies."""
+    try:
+        ydl, meta = _extract(url, opts)
+    except LoginRequired as error:
+        if cookie_file:
+            cookies.record(platform, False, error.reason)
+        raise
+    if cookie_file:
+        cookies.record(platform, True)
+    return ydl, meta
+
+
+def refresh(url: str) -> None:
+    """Open one video's page with the platform cookies, without downloading it.
+
+    Sites rotate session cookies on every visit and forget old ones, so a
+    session nobody uses goes stale. The rotated cookies are saved by
+    `cookies.session`. Raises `DownloadError` like `download_video`.
+    """
+    platform = platform_of(url)
+    with (
+        tempfile.TemporaryDirectory(prefix="sbahelper-") as workdir,
+        cookies.session(settings.cookies_dir, platform) as cookie_file,
+    ):
+        if cookie_file is None:
+            return
+        opts = _options(platform, Path(workdir), cookie_file, None)
+        ydl, _ = _extract_recorded(url, opts, platform, cookie_file)
+        ydl.close()
+
+
 def has_audio(path: Path) -> bool | None:
     """Whether the file has an audio stream; None when ffprobe cannot tell."""
     try:
@@ -461,7 +495,7 @@ def download_video(
     try:
         with cookies.session(settings.cookies_dir, platform) as cookie_file:
             opts = _options(platform, workdir, cookie_file, on_progress)
-            ydl, meta = _extract(url, opts)
+            ydl, meta = _extract_recorded(url, opts, platform, cookie_file)
             with ydl:
                 info = validate(platform, meta)
                 if on_info:

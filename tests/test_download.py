@@ -8,7 +8,7 @@ from unittest.mock import MagicMock
 import pytest
 import yt_dlp
 
-from sbahelper import download
+from sbahelper import cookies, download
 from sbahelper.config import settings
 from sbahelper.download import (
     Blocked,
@@ -379,3 +379,57 @@ def test_silent_youtube_video_is_fine(run) -> None:
     # Only TikTok produces silent merges; YouTube videos may legitimately be silent.
     result, _ = run(audio=False)
     result.cleanup()
+
+
+# --------------------------------------------------------------------------- #
+#  Cookie health and refresh                                                  #
+# --------------------------------------------------------------------------- #
+
+YOUTUBE_COOKIES = ".youtube.com\tTRUE\t/\tTRUE\t1893456000\tLOGIN_INFO\tlogin\n"
+
+
+def test_accepted_cookies_are_recorded(run) -> None:
+    cookies.import_text(settings.cookies_dir, YOUTUBE_COOKIES)
+    result, _ = run()
+    result.cleanup()
+    health = cookies.health("youtube")
+    assert health is not None and health.ok
+
+
+def test_login_request_is_recorded_only_when_cookies_were_sent(monkeypatch) -> None:
+    def asks_to_log_in(url, opts):
+        raise LoginRequired("login", "Sign in to confirm you're not a bot")
+
+    monkeypatch.setattr(download, "_extract", asks_to_log_in)
+    with pytest.raises(LoginRequired):
+        download_video(YOUTUBE)
+    assert cookies.health("youtube") is None
+
+    cookies.import_text(settings.cookies_dir, YOUTUBE_COOKIES)
+    with pytest.raises(LoginRequired):
+        download_video(YOUTUBE)
+    health = cookies.health("youtube")
+    assert health is not None and not health.ok and "not a bot" in health.reason
+
+
+def test_refresh_opens_the_page_without_downloading(monkeypatch) -> None:
+    cookies.import_text(settings.cookies_dir, YOUTUBE_COOKIES)
+    ydl = MagicMock()
+    seen: dict = {}
+
+    def fake_extract(url, opts):
+        seen["opts"] = opts
+        return ydl, meta()
+
+    monkeypatch.setattr(download, "_extract", fake_extract)
+    download.refresh(YOUTUBE)
+
+    assert Path(seen["opts"]["cookiefile"]).parent == settings.cookies_dir
+    ydl.close.assert_called_once()
+    ydl.process_ie_result.assert_not_called()
+    assert cookies.health("youtube").ok
+
+
+def test_refresh_without_cookies_does_nothing(monkeypatch) -> None:
+    monkeypatch.setattr(download, "_extract", MagicMock(side_effect=AssertionError))
+    download.refresh(YOUTUBE)

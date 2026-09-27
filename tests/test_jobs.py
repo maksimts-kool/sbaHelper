@@ -11,6 +11,7 @@ from telegram.ext import ApplicationBuilder
 from sbahelper import jobs
 from sbahelper.config import settings
 from sbahelper.cookies import CookieStatus
+from sbahelper.download import LoginRequired
 from sbahelper.handlers import STATS_KEY
 from sbahelper.stats import DownloadEvent, StatsStore
 
@@ -142,6 +143,40 @@ def test_reminder_is_a_single_error(monkeypatch, caplog) -> None:
     assert "Send fresh cookies" in caplog.records[0].getMessage()
 
 
+def test_cookie_refresh_visits_each_check_url_with_cookies(monkeypatch, caplog) -> None:
+    monkeypatch.setattr(
+        settings,
+        "check_urls",
+        {"tiktok": "https://vm.tiktok.com/x/", "youtube": "https://youtu.be/x"},
+    )
+    jobs.cookies.import_text(
+        settings.cookies_dir, ".youtube.com\tTRUE\t/\tTRUE\t0\tSID\tsid\n"
+    )  # no TikTok cookies: nothing to keep alive there
+    visited = []
+    monkeypatch.setattr(jobs, "refresh", visited.append)
+
+    with caplog.at_level(logging.INFO, logger="sbahelper.jobs"):
+        jobs.refresh_cookies_now()
+
+    assert visited == ["https://youtu.be/x"]
+    assert [r.getMessage() for r in caplog.records] == ["Cookies refreshed. Platform=youtube"]
+
+
+def test_rejected_cookies_during_refresh_alert_admins(monkeypatch, caplog) -> None:
+    monkeypatch.setattr(settings, "check_urls", {"youtube": "https://youtu.be/x"})
+    jobs.cookies.import_text(settings.cookies_dir, ".youtube.com\tTRUE\t/\tTRUE\t0\tSID\tsid\n")
+
+    def rejected(url):
+        raise LoginRequired("login", "Sign in to confirm you're not a bot")
+
+    monkeypatch.setattr(jobs, "refresh", rejected)
+    with caplog.at_level(logging.INFO, logger="sbahelper.jobs"):
+        jobs.refresh_cookies_now()
+
+    assert [r.levelname for r in caplog.records] == ["ERROR"]
+    assert "Send fresh cookies" in caplog.records[0].getMessage()
+
+
 # --------------------------------------------------------------------------- #
 #  Scheduling                                                                 #
 # --------------------------------------------------------------------------- #
@@ -168,4 +203,17 @@ def test_weekly_summary_fires_on_the_configured_day_and_time(store) -> None:
 def test_jobs_depend_on_configuration(store, monkeypatch) -> None:
     assert set(scheduled(None)) == {"cookie-expiry"}
     monkeypatch.setattr(settings, "check_urls", {"tiktok": "https://vm.tiktok.com/x/"})
-    assert set(scheduled(store)) == {"weekly-stats", "cookie-expiry", "startup-checks"}
+    assert set(scheduled(store)) == {
+        "weekly-stats",
+        "cookie-expiry",
+        "startup-checks",
+        "cookie-refresh",
+    }
+    monkeypatch.setattr(settings, "cookies_refresh_hours", 0)
+    assert "cookie-refresh" not in scheduled(store)
+
+
+def test_cookie_refresh_runs_every_few_hours(monkeypatch) -> None:
+    monkeypatch.setattr(settings, "check_urls", {"youtube": "https://youtu.be/x"})
+    job = scheduled(None)["cookie-refresh"]
+    assert job.job.trigger.interval == timedelta(hours=4)

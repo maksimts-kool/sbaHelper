@@ -1,10 +1,11 @@
 from datetime import UTC, datetime
+from zoneinfo import ZoneInfo
 
 import pytest
 
 from sbahelper import texts
 from sbahelper.checks import CheckResult
-from sbahelper.cookies import CookieStatus
+from sbahelper.cookies import CookieStatus, Health
 from sbahelper.download import VideoInfo
 from sbahelper.stats import UserTally, aggregate
 
@@ -208,6 +209,29 @@ def test_cookie_status_of_expired_and_anonymous_files() -> None:
     text = texts.cookies_status([expired, anonymous], now)
     assert "3 шт., вход истёк" in text
     assert "2 шт., без входа в аккаунт" in text
+
+
+def test_cookie_status_shows_what_the_site_said_last_time() -> None:
+    now = datetime(2026, 9, 27, 15, tzinfo=ZoneInfo("Europe/Tallinn"))
+    expires = datetime(2027, 10, 23, tzinfo=UTC)
+    rejected = Health(False, datetime(2026, 9, 27, 11, 2, tzinfo=UTC), "Sign in")
+    accepted = Health(True, datetime(2026, 9, 26, 20, 30, tzinfo=UTC))
+    text = texts.cookies_status(
+        [
+            CookieStatus("tiktok", 24, True, expires, now, accepted),
+            CookieStatus("youtube", 23, True, expires, now, rejected),
+        ],
+        now,
+    )
+    assert "✅ работают, последний раз 26 сентября в 23:30" in text
+    assert "❌ сайт просит войти заново (27 сентября в 14:02)" in text
+    assert "инкогнито" in text
+
+
+def test_cookie_status_without_a_result_suggests_a_check() -> None:
+    now = datetime(2026, 9, 1, tzinfo=UTC)
+    text = texts.cookies_status([CookieStatus("tiktok", 3, True, None, now)], now)
+    assert "❔ ещё не проверялись — /check" in text
 
 
 def test_cookies_saved_lists_platforms() -> None:

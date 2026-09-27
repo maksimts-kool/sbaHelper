@@ -32,9 +32,16 @@ within the hour. Paste that file into Portainer → Stacks, set `DOWNLOADER_BOT_
 As an admin, send the bot a cookie file in a private chat: a Netscape `cookies.txt` or the
 JSON export of the Cookie-Editor extension, with any mix of sites. The bot keeps the TikTok and
 YouTube cookies, saves them per platform and deletes your message. Dropping a file into the
-cookies folder works too (imported on the next start). `/cookies` shows what is loaded and when
-the login expires; admins get a Telegram alert when a site asks for a login or cookies are
-about to expire.
+cookies folder works too (imported on the next start). `/cookies` shows what is loaded, when
+the login expires and whether the site accepted the cookies the last time they were used;
+admins get a Telegram alert when a site asks for a login or cookies are about to expire.
+
+YouTube cookies only last if nothing else uses that login: open a private/incognito window,
+log in, open `https://www.youtube.com/robots.txt`, export the youtube.com cookies, then close
+the window and never open that session again. A browser that keeps using the session rotates
+the cookies and YouTube rejects the bot's copy within hours. The bot saves every rotation it
+receives and, with `CHECK_YOUTUBE_URL` set, visits that video every `COOKIES_REFRESH_HOURS`
+so the session stays in use. A spare Google account is safer than your main one.
 
 ## Commands
 

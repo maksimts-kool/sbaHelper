@@ -10,9 +10,15 @@ Both accept a Netscape `cookies.txt` or a JSON export (Cookie-Editor,
 EditThisCookie), split the cookies by domain and replace `tiktok.txt` /
 `youtube.txt`. One file with every site in it is fine.
 
-Each download works on a private copy of the platform file (`session()`), and
-the copy yt-dlp refreshed is swapped back atomically, keeping sessions alive
-without concurrent downloads trampling each other's writes.
+Each download works on a private copy of the platform file (`session()`).
+Sites rotate session cookies on almost every request (YouTube's
+`__Secure-*PSIDTS` go stale within hours), so whatever a run changed is merged
+back into the platform file, after failed runs too, and parallel runs merge
+their own changes instead of overwriting each other's.
+
+`record()` keeps the last real answer from the site per platform ("accepted"
+or "asks to log in"), because an expiry date in the file says nothing about
+whether the site still accepts the session.
 """
 
 from __future__ import annotations
@@ -22,9 +28,10 @@ import logging
 import os
 import shutil
 import tempfile
+import threading
 from collections.abc import Iterator
 from contextlib import contextmanager, suppress
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -43,6 +50,13 @@ LOGIN_COOKIES = {
 IMPORTABLE_SUFFIXES = (".txt", ".json")
 MAX_FILE_BYTES = 1024 * 1024
 _HEADER = "# Netscape HTTP Cookie File\n# Written by sbahelper. yt-dlp keeps it up to date.\n\n"
+
+# Guards the platform files and the state below across download threads.
+_lock = threading.Lock()
+# Bumped by every import: a run that started on older cookies must not merge
+# its changes into a freshly uploaded session, and old health no longer applies.
+_generation: dict[str, int] = {}
+_health: dict[str, tuple[int, Health]] = {}
 
 
 class CookieError(ValueError):
@@ -79,6 +93,15 @@ class Cookie:
 
 
 @dataclass(frozen=True, slots=True)
+class Health:
+    """The last time the site saw these cookies: accepted them or asked to log in."""
+
+    ok: bool
+    at: datetime
+    reason: str = ""
+
+
+@dataclass(frozen=True, slots=True)
 class CookieStatus:
     platform: str
     count: int
@@ -86,6 +109,8 @@ class CookieStatus:
     # Earliest expiry among the login cookies; None for session-only or no login.
     login_expires: datetime | None
     updated: datetime | None
+    # None until a download or check has used the current cookies.
+    health: Health | None = None
 
 
 def _flag(value: bool) -> str:
@@ -204,7 +229,9 @@ def import_text(directory: Path, text: str, *, source: str = "upload") -> dict[s
 
     directory.mkdir(parents=True, exist_ok=True)
     for platform, items in groups.items():
-        _write_atomic(platform_file(directory, platform), items)
+        with _lock:
+            _write_atomic(platform_file(directory, platform), items)
+            _generation[platform] = _generation.get(platform, 0) + 1
         log.info("Cookies imported. Platform=%s Count=%d Source=%s", platform, len(items), source)
     return {platform: len(items) for platform, items in groups.items()}
 
@@ -248,17 +275,36 @@ def _write_atomic(path: Path, cookies: list[Cookie]) -> None:
 def session(directory: Path, platform: str) -> Iterator[str | None]:
     """A private copy of the platform's cookie file for one yt-dlp run.
 
-    yt-dlp rewrites its cookie file in place when it closes. Handing it a copy
-    and swapping that copy back with `os.replace` keeps parallel downloads from
-    reading a half-written file. The swap is skipped if the file was replaced
-    meanwhile (an admin uploaded new cookies) or the run failed.
+    yt-dlp rewrites its cookie file when it closes, failed runs included. The
+    cookies that run added, changed or dropped are merged into the platform
+    file under a lock, so parallel runs keep each other's rotations. Nothing
+    is merged if new cookies were imported meanwhile.
     """
     source = platform_file(directory, platform)
-    if not source.is_file():
+    with _lock:
+        if not source.is_file():
+            tmp = None
+        else:
+            tmp, writable = _copy(source, directory, platform)
+            generation = _generation.get(platform, 0)
+            try:
+                start = _read(Path(tmp))
+            except OSError, CookieError, UnicodeDecodeError:
+                start = {}  # unreadable: yt-dlp will say so; nothing to merge into
+    if tmp is None:
         yield None
         return
-    original_mtime = source.stat().st_mtime_ns
 
+    try:
+        yield tmp
+    finally:
+        if writable:
+            _merge_back(source, platform, generation, start, Path(tmp))
+        with suppress(OSError):
+            os.remove(tmp)
+
+
+def _copy(source: Path, directory: Path, platform: str) -> tuple[str, bool]:
     try:
         fd, tmp = tempfile.mkstemp(dir=directory, prefix=f".{platform}-", suffix=".tmp")
         writable = True
@@ -266,15 +312,63 @@ def session(directory: Path, platform: str) -> Iterator[str | None]:
         fd, tmp = tempfile.mkstemp(prefix=f"sbahelper-{platform}-", suffix=".txt")
         writable = False
     os.close(fd)
-
     try:
         shutil.copyfile(source, tmp)
-        yield tmp
-        if writable and source.stat().st_mtime_ns == original_mtime:
-            os.replace(tmp, source)
-    finally:
+    except BaseException:
         with suppress(OSError):
             os.remove(tmp)
+        raise
+    return tmp, writable
+
+
+type _Jar = dict[tuple[str, str, str], Cookie]
+
+
+def _read(path: Path) -> _Jar:
+    return {(c.domain, c.path, c.name): c for c in _parse_netscape(path.read_text("utf-8"))}
+
+
+def _merge_back(source: Path, platform: str, generation: int, start: _Jar, copy: Path) -> None:
+    try:
+        end = _read(copy)
+    except OSError, CookieError, UnicodeDecodeError:
+        log.debug("Cookie copy not merged. Platform=%s", platform, exc_info=True)
+        return
+    with _lock:
+        if _generation.get(platform, 0) != generation:
+            return  # new cookies were imported during the run
+        try:
+            current = _read(source)
+        except OSError, CookieError, UnicodeDecodeError:
+            return
+        merged = dict(current)
+        for key, cookie in end.items():
+            before = start.get(key)
+            if before is None or (before.value, before.expires) != (cookie.value, cookie.expires):
+                # yt-dlp does not write the HttpOnly marker: keep ours.
+                old = current.get(key) or before
+                merged[key] = replace(cookie, http_only=old.http_only) if old else cookie
+        for key in start.keys() - end.keys():
+            merged.pop(key, None)
+        if merged == current:
+            return
+        try:
+            _write_atomic(source, list(merged.values()))
+        except OSError as error:
+            log.warning("Refreshed cookies not saved. Platform=%s Error=%s", platform, error)
+
+
+def record(platform: str, ok: bool, reason: str = "") -> None:
+    """Remember whether the site accepted the current cookies."""
+    with _lock:
+        _health[platform] = (_generation.get(platform, 0), Health(ok, datetime.now(UTC), reason))
+
+
+def health(platform: str) -> Health | None:
+    """The last recorded result for the current cookies; None after a new import."""
+    with _lock:
+        generation, result = _health.get(platform, (-1, None))
+        return result if generation == _generation.get(platform, 0) else None
 
 
 def status(directory: Path, now: datetime | None = None) -> list[CookieStatus]:
@@ -299,6 +393,7 @@ def status(directory: Path, now: datetime | None = None) -> list[CookieStatus]:
                 logged_in=bool(alive),
                 login_expires=datetime.fromtimestamp(min(expiries), UTC) if expiries else None,
                 updated=updated,
+                health=health(platform),
             )
         )
     return statuses

@@ -6,7 +6,7 @@ import asyncio
 import logging
 import sqlite3
 import time
-from datetime import UTC, datetime
+from datetime import datetime
 
 from telegram import Message, Update, User
 from telegram.error import NetworkError, TelegramError
@@ -255,7 +255,7 @@ async def cmd_stats(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 async def cmd_cookies(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if message := update.effective_message:
         statuses = await asyncio.to_thread(cookies.status, settings.cookies_dir)
-        await message.reply_text(texts.cookies_status(statuses, datetime.now(UTC)))
+        await message.reply_text(texts.cookies_status(statuses, datetime.now(settings.tz)))
 
 
 async def cmd_check(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
