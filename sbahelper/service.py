@@ -144,14 +144,20 @@ class StatusMessage:
             self._pending = asyncio.get_running_loop().create_task(self._refresh())
 
     async def _refresh(self) -> None:
-        wait = self._last_edit + MIN_EDIT_INTERVAL_SEC - time.monotonic()
-        if wait > 0:
-            await asyncio.sleep(wait)
-        async with self._lock:
-            if not self._live or self._info is None:
-                return
-            line = texts.progress(self._percent) if self._percent >= 0 else texts.CHECKING
-            await self._edit(texts.status(self._info, line), low=True)
+        """Runs as a fire-and-forget task, so it must never raise."""
+        try:
+            wait = self._last_edit + MIN_EDIT_INTERVAL_SEC - time.monotonic()
+            if wait > 0:
+                await asyncio.sleep(wait)
+            async with self._lock:
+                if not self._live or self._info is None:
+                    return
+                line = texts.progress(self._percent) if self._percent >= 0 else texts.CHECKING
+                await self._edit(texts.status(self._info, line), low=True)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            log.exception("Status refresh crashed. Chat=%s", self.message.chat_id)
 
     async def note(self, text: str) -> None:
         """An intermediate text (e.g. "queued"); later progress may replace it."""
@@ -189,7 +195,13 @@ class StatusMessage:
             return
         try:
             if low:
-                await self.message.edit_text(text, rate_limit_args=LOW)
+                # Only bot methods take rate_limit_args; Message shortcuts do not.
+                await self.message.get_bot().edit_message_text(
+                    text,
+                    chat_id=self.message.chat_id,
+                    message_id=self.message.message_id,
+                    rate_limit_args=LOW,
+                )
             else:
                 await self.message.edit_text(text)
         except Throttled:
@@ -673,7 +685,14 @@ class DownloadService:
         try:
             while True:
                 with suppress(TelegramError):
-                    await message.reply_chat_action(ChatAction.UPLOAD_VIDEO, rate_limit_args=LOW)
+                    await message.get_bot().send_chat_action(
+                        message.chat_id,
+                        ChatAction.UPLOAD_VIDEO,
+                        message_thread_id=(
+                            message.message_thread_id if message.is_topic_message else None
+                        ),
+                        rate_limit_args=LOW,
+                    )
                 await asyncio.sleep(CHAT_ACTION_EVERY_SEC)
         except asyncio.CancelledError:
             return

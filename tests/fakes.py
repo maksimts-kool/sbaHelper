@@ -87,10 +87,10 @@ class FakeMessage:
     async def reply_document(self, document, **kwargs):
         return await self._send_media("document", document, kwargs)
 
-    async def reply_chat_action(self, action, **kwargs) -> None:
-        self.actions.append(action)
+    def get_bot(self) -> FakeBot:
+        return FakeBot(self)
 
-    async def edit_text(self, text: str, **kwargs) -> None:
+    async def edit_text(self, text: str, *, reply_markup=None) -> None:
         self.edits.append(text)
         self.text = text
 
@@ -105,6 +105,22 @@ class FakeMessage:
     @property
     def status(self) -> FakeMessage:
         return self.replies[0]
+
+
+class FakeBot:
+    """The bot methods StatusMessage and the service call directly (strict signatures)."""
+
+    def __init__(self, message: FakeMessage) -> None:
+        self.message = message
+
+    async def edit_message_text(self, text, *, chat_id, message_id, rate_limit_args=None):
+        assert (chat_id, message_id) == (self.message.chat_id, self.message.message_id)
+        await self.message.edit_text(text)
+
+    async def send_chat_action(
+        self, chat_id, action, message_thread_id=None, *, rate_limit_args=None
+    ):
+        self.message.actions.append(action)
 
 
 class FakeRunner:
