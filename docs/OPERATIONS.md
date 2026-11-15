@@ -60,10 +60,13 @@ starts in production, in this order.
    `Database migrated. Version=3`, the cookie counts and `Bot started. … Access=…`. The
    container turns `healthy` within about a minute.
 
-Rollback to the previous image: set `SBAHELPER_TAG` to its SHA and update the stack. It
-works on the migrated database as is (it only uses the `downloads` table, which the
-migrations leave unchanged, and it runs as root, so the new ownership does not stop it);
-the `.pre-v3-*.bak` copy is there if you want the exact old file back.
+Rollback to the previous image: paste the **previous** compose file back into the stack
+(it pins nothing, runs the old root image and keeps the default capabilities) and update
+the stack. The old image works on the migrated database as is (it only uses the
+`downloads` table, which the migrations leave unchanged) and, as root with default
+capabilities, reads the 10001-owned files. Do not combine the old image with the new
+compose file: with all capabilities dropped, root cannot open 0600 files owned by 10001.
+The `.pre-v3-*.bak` copy is there if you want the exact old database back.
 
 ## Updates and rollback
 
