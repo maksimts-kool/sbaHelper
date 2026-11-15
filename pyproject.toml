@@ -31,3 +31,5 @@ ignore = ["RUF001", "RUF002", "RUF003"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["."]
+# python-telegram-bot's own RetryAfter constructor reads its deprecated int attribute.
+filterwarnings = ["ignore:.*retry_after.*:telegram.warnings.PTBDeprecationWarning"]

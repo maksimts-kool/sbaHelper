@@ -1,4 +1,5 @@
-"""Scheduled jobs: weekly summary, cookie expiry reminder and refresh, startup checks."""
+"""Scheduled jobs: weekly summary, daily maintenance, cookie expiry check and
+refresh, startup checks and the liveness heartbeat."""
 
 from __future__ import annotations
 
@@ -7,14 +8,15 @@ import logging
 import sqlite3
 from datetime import UTC, datetime, time, timedelta
 
-from telegram.error import TelegramError
+from telegram.error import BadRequest, ChatMigrated, Forbidden, TelegramError
 from telegram.ext import Application, ContextTypes
 
-from sbahelper import cookies, texts
+from sbahelper import cookies, health, texts
 from sbahelper.checks import run_checks
 from sbahelper.config import settings
-from sbahelper.download import DownloadError, LoginRequired, refresh
-from sbahelper.handlers import STATS_KEY, is_allowed, stats_store
+from sbahelper.download import DownloadError, LoginRequired, cleanup_stale_workdirs, refresh
+from sbahelper.prefs import ChatSettings
+from sbahelper.runtime import Runtime, runtime
 from sbahelper.stats import week_period
 
 log = logging.getLogger(__name__)
@@ -22,39 +24,102 @@ log = logging.getLogger(__name__)
 # Remind admins this long before login cookies expire.
 COOKIE_WARNING = timedelta(days=3)
 COOKIE_CHECK_AT = time(12)
+MAINTENANCE_AT = time(4, 30)
 STARTUP_CHECK_DELAY_SEC = 5
+HEARTBEAT_EVERY_SEC = 30
+
+
+async def _chat_settings(rt: Runtime, chat_id: int) -> ChatSettings:
+    if rt.prefs is None:
+        return ChatSettings(chat_id)
+    try:
+        return await asyncio.to_thread(rt.prefs.chat, chat_id)
+    except sqlite3.Error:
+        return ChatSettings(chat_id)
+
+
+async def _send_summary(
+    context: ContextTypes.DEFAULT_TYPE, rt: Runtime, chat_id: int, text: str
+) -> bool:
+    """Send to the chat's chosen topic, falling back to the main chat if it is gone."""
+    chat = await _chat_settings(rt, chat_id)
+    thread = chat.summary_thread_id
+    try:
+        try:
+            await context.bot.send_message(chat_id, text, message_thread_id=thread)
+        except BadRequest as error:
+            if thread is None or "thread" not in str(error).lower():
+                raise
+            log.warning("Summary topic gone; using the main chat. Chat=%s", chat_id)
+            if rt.prefs is not None:
+                await asyncio.to_thread(rt.prefs.update_chat, chat_id, summary_thread_id=None)
+            await context.bot.send_message(chat_id, text)
+    except ChatMigrated as error:
+        new_id = error.new_chat_id
+        if rt.stats is not None:
+            await asyncio.to_thread(rt.stats.migrate_chat, chat_id, new_id)
+        log.info("Chat migrated while sending. Old=%s New=%s", chat_id, new_id)
+        await context.bot.send_message(new_id, text)
+    except Forbidden as error:
+        # Removed or blocked: do not try again every week.
+        log.warning("Weekly stats not sent; chat marked inactive. Chat=%s Error=%s", chat_id, error)
+        if rt.prefs is not None:
+            await asyncio.to_thread(rt.prefs.update_chat, chat_id, active=False)
+        return False
+    return True
 
 
 async def send_weekly_stats(context: ContextTypes.DEFAULT_TYPE) -> None:
     """Each active chat gets its own summary; chats without downloads get nothing."""
-    store = stats_store(context)
-    if store is None:
+    rt = runtime(context)
+    if rt is None or rt.stats is None:
         return
     start, end = week_period(datetime.now(settings.tz))
     try:
-        chat_ids = await asyncio.to_thread(store.active_chat_ids, start, end)
+        chat_ids = await asyncio.to_thread(rt.stats.active_chat_ids, start, end)
     except sqlite3.Error as error:
         log.error("Weekly stats not read. Error=%s", error)
         return
 
-    for chat_id in filter(is_allowed, chat_ids):
-        stats = await asyncio.to_thread(store.weekly_stats, chat_id=chat_id, start=start, end=end)
+    for chat_id in filter(settings.chat_allowed, chat_ids):
         try:
-            await context.bot.send_message(chat_id, texts.weekly_stats(stats))
-        except TelegramError as error:
+            stats = await asyncio.to_thread(
+                rt.stats.period_stats, chat_id=chat_id, start=start, end=end
+            )
+            sent = await _send_summary(context, rt, chat_id, texts.weekly_stats(stats))
+        except (TelegramError, sqlite3.Error) as error:
             log.warning("Weekly stats not sent. Chat=%s Error=%s", chat_id, error)
         else:
-            log.info("Weekly stats sent. Chat=%s Downloads=%d", chat_id, stats.total_downloads)
+            if sent:
+                log.info("Weekly stats sent. Chat=%s Downloads=%d", chat_id, stats.total_downloads)
 
-    if settings.stats_retention_days:
-        cutoff = end - timedelta(days=settings.stats_retention_days)
+
+async def maintenance(context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Daily, independent of the summary: retention, cache expiry, stray work dirs."""
+    rt = runtime(context)
+    if rt is not None and rt.stats is not None and settings.stats_retention_days:
+        cutoff = datetime.now(UTC) - timedelta(days=settings.stats_retention_days)
         try:
-            removed = await asyncio.to_thread(store.prune, older_than=cutoff)
+            removed = await asyncio.to_thread(rt.stats.prune, older_than=cutoff)
         except sqlite3.Error as error:
             log.warning("Old stats not pruned. Error=%s", error)
         else:
             if removed:
                 log.info("Old stats pruned. Rows=%d Before=%s", removed, cutoff.date())
+    if rt is not None and rt.cache is not None:
+        try:
+            expired = await asyncio.to_thread(rt.cache.prune)
+        except sqlite3.Error as error:
+            log.warning("Cache not pruned. Error=%s", error)
+        else:
+            if expired:
+                log.info("Expired cache entries removed. Rows=%d", expired)
+    # Only directories older than any possible live worker.
+    stale = await asyncio.to_thread(
+        cleanup_stale_workdirs, settings.temp_dir, settings.download_timeout_sec * 4
+    )
+    if stale:
+        log.warning("Abandoned work directories removed. Count=%d", stale)
 
 
 def cookie_problems(statuses: list[cookies.CookieStatus], now: datetime) -> list[str]:
@@ -108,7 +173,16 @@ async def refresh_cookies(context: ContextTypes.DEFAULT_TYPE) -> None:
 
 
 async def run_startup_checks(context: ContextTypes.DEFAULT_TYPE) -> None:
-    await asyncio.to_thread(run_checks)
+    rt = runtime(context)
+    await asyncio.to_thread(run_checks, rt.db if rt else None)
+
+
+async def heartbeat(context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Proof of life for the container healthcheck: the event loop and scheduler run."""
+    rt = runtime(context)
+    if rt is not None and rt.service.closing:
+        return
+    await asyncio.to_thread(health.beat, settings.heartbeat_path)
 
 
 def schedule(app: Application) -> None:
@@ -116,8 +190,12 @@ def schedule(app: Application) -> None:
     if jobs is None:
         log.error("JobQueue is unavailable: no weekly stats, cookie reminders or startup checks.")
         return
+    rt = app.bot_data.get("runtime")
+    has_stats = isinstance(rt, Runtime) and rt.stats is not None
 
-    if app.bot_data.get(STATS_KEY) is not None:
+    jobs.run_repeating(heartbeat, HEARTBEAT_EVERY_SEC, first=0, name="heartbeat")
+    jobs.run_daily(maintenance, MAINTENANCE_AT.replace(tzinfo=settings.tz), name="maintenance")
+    if has_stats:
         # JobQueue counts days from Sunday, `datetime.weekday()` from Monday.
         weekday = (settings.stats_weekday + 1) % 7
         at = settings.stats_time.replace(tzinfo=settings.tz)

@@ -39,10 +39,12 @@ def test_durations_and_sizes() -> None:
     assert texts.format_total_duration(3600) == "1 ч"
     assert texts.format_total_duration(180) == "3 мин"
     assert texts.format_total_duration(42) == "42 сек"
+    # Decimal units, the same as MAX_FILE_SIZE_BYTES: 1 МБ = 1,000,000 bytes.
     assert texts.format_size(0) == "0 МБ"
-    assert texts.format_size(int(2.5 * 1024**2)) == "2.5 МБ"
-    assert texts.format_size(812 * 1024**2) == "812 МБ"
-    assert texts.format_size(2 * 1024**3) == "2.0 ГБ"
+    assert texts.format_size(2_500_000) == "2.5 МБ"
+    assert texts.format_size(45_000_000) == "45 МБ"
+    assert texts.format_size(812_000_000) == "812 МБ"
+    assert texts.format_size(2_000_000_000) == "2.0 ГБ"
 
 
 def test_period_within_and_across_months() -> None:
@@ -88,8 +90,8 @@ def test_invisible_names_are_detected() -> None:
 
 
 def test_start_mentions_the_limits() -> None:
-    text = texts.start(5, 50)
-    assert "до 5 мин" in text and "до 50 МБ" in text
+    text = texts.start(5, 45_000_000)
+    assert "до 5 мин" in text and "до 45 МБ" in text
 
 
 def test_caption_is_compact_and_skips_unknown_counts() -> None:
@@ -126,7 +128,7 @@ START, END = datetime(2026, 7, 20, tzinfo=UTC), datetime(2026, 7, 26, 20, tzinfo
 
 
 def row(user_id, name, platform="tiktok", views=None, title="Видео", username=None):
-    return (user_id, name, username, platform, 60, 1024**2, title, "author", views)
+    return (user_id, name, username, platform, 60, 1_000_000, title, "author", views)
 
 
 def weekly(rows, **kwargs) -> str:
@@ -245,3 +247,102 @@ def test_check_results() -> None:
     )
     assert "✅ <b>TikTok</b> — Кот (2.1 MB, 3 s)" in text
     assert "❌ <b>YouTube</b> — &lt;x&gt;" in text
+
+
+# --------------------------------------------------------------------------- #
+#  Telegram limits                                                            #
+# --------------------------------------------------------------------------- #
+
+EMOJI_FAMILY = "👨\u200d👩\u200d👧\u200d👦"
+
+
+def test_visible_length_counts_utf16_after_parsing() -> None:
+    assert texts.visible_length("<b>a&amp;b</b>") == 3
+    assert texts.visible_length("😀") == 2  # one code point, two UTF-16 units
+    assert texts.visible_length(texts.INFO) == 2  # custom emoji tag → its fallback
+
+
+@pytest.mark.parametrize(
+    "title",
+    [
+        "о" * 5000,
+        "&<>" * 2000,
+        "😀" * 3000,
+        EMOJI_FAMILY * 500,
+        "a\u0301" * 3000,  # combining accents
+        "#tag @user https://x.io 12:34 " * 300,
+    ],
+)
+def test_caption_and_status_fit_telegram_limits(title: str) -> None:
+    video = info(title=title, uploader=title, view_count=10**9, like_count=10**9)
+    caption = texts.caption(video)
+    status = texts.status(video, texts.progress(50))
+    assert texts.visible_length(caption) <= texts.CAPTION_LIMIT
+    assert texts.visible_length(status) <= texts.MESSAGE_LIMIT
+    # Escapes are never cut: every "&" starts a complete entity.
+    import re
+
+    assert not re.search(r"&(?!amp;|lt;|gt;|quot;|#x27;)", caption)
+    assert caption.count("<b>") == caption.count("</b>") == 1
+
+
+def test_truncate_never_ends_inside_a_joined_emoji() -> None:
+    cut = texts.truncate("x" + EMOJI_FAMILY * 3, 4)
+    assert not cut.rstrip("…").endswith("\u200d")
+
+
+def test_fit_shortens_the_longest_field() -> None:
+    def render(fields: dict[str, str]) -> str:
+        return f"<b>{texts.safe(fields['a'])}</b> {texts.safe(fields['b'])}"
+
+    text = texts.fit(render, {"a": "x" * 50, "b": "short"}, 20)
+    assert texts.visible_length(text) <= 20 and "short" in text
+
+
+def test_weekly_summary_with_long_names_fits() -> None:
+    rows = [row(i, "Ж" * 500 + str(i), title="Т" * 5000, views=i) for i in range(1, 50)]
+    assert texts.visible_length(weekly(rows)) <= texts.MESSAGE_LIMIT
+
+
+def test_error_texts_by_code() -> None:
+    from sbahelper import download
+
+    assert texts.error_text(download.Rejected("x", code="photo"), 45_000_000).startswith("🖼")
+    too_big = download.Rejected("x", code="too_big", size=52_000_000)
+    assert "52 МБ" in texts.error_text(too_big, 45_000_000)
+    assert "45 МБ" in texts.error_text(too_big, 45_000_000)
+    too_long = download.Rejected("x", code="too_long", duration=400, limit=300)
+    assert "6:40" in texts.error_text(too_long, 1) and "5 мин" in texts.error_text(too_long, 1)
+    login = texts.error_text(download.LoginRequired("Sign in"), 1)
+    assert "Возможно" in login  # not presented as a certain diagnosis
+    for code in sorted(texts.REFUSAL_CODES):
+        assert texts.refusal(code) != texts.UNEXPECTED
+
+
+def test_failure_reason_is_clipped_before_escaping() -> None:
+    text = texts.failed("<" * 1000)
+    assert text.endswith("…</code>") and "&lt" + "</code>" not in text
+
+
+def test_period_titles_and_quiet_day() -> None:
+    from sbahelper.stats import aggregate as agg
+
+    day = agg([], period_start=datetime(2026, 7, 21), period_end=datetime(2026, 7, 21, 15))
+    assert texts.period_stats(day, period="day").startswith("📊 <b>Сегодня · 21 июля</b>")
+
+
+def test_anonymous_rows_are_counted_without_names() -> None:
+    text = weekly([row(1, "Максим"), row(0, "", views=None)])
+    assert "Скачано <b>2</b>" in text and "без имени — 1" in text
+
+
+def test_privacy_text_states_retention() -> None:
+    text = texts.privacy(retention_days=400, cache_days=30)
+    assert "400 дней" in text and "до 30 дней" in text
+    assert "журналы" in text.lower()
+    assert "бессрочно" in texts.privacy(retention_days=0, cache_days=0)
+
+
+def test_cookie_confirmation_admits_a_failed_deletion() -> None:
+    assert "удали его сам" in texts.cookies_saved({"tiktok": 1}, deleted=False)
+    assert "Сообщение с файлом удалил" in texts.cookies_saved({"tiktok": 1})

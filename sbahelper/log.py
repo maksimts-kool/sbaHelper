@@ -5,6 +5,7 @@
 The tag comes from the logger name (`sbahelper.download` → DOWNLOAD). Messages
 read as a short sentence followed by `Key=Value` pairs. Colours are used only
 when writing to a terminal (or with FORCE_COLOR) and never with NO_COLOR.
+Every line, traceback included, goes through `redact.redact` before output.
 """
 
 from __future__ import annotations
@@ -13,6 +14,8 @@ import logging
 import os
 import sys
 from datetime import datetime, tzinfo
+
+from sbahelper.redact import redact
 
 _TAG_ALIASES = {
     "app": "BOT",
@@ -55,7 +58,7 @@ class PrettyFormatter(logging.Formatter):
             stamp.isoformat(timespec="seconds"),
             f"[{tag_for(record.name)}]",
             f"{record.levelname}:",
-            record.getMessage(),
+            redact(record.getMessage()),
         ]
         if self.color:
             parts[0] = f"{_DIM}{parts[0]}{_RESET}"
@@ -64,9 +67,9 @@ class PrettyFormatter(logging.Formatter):
 
         line = " ".join(parts)
         if record.exc_info:
-            line += "\n" + self.formatException(record.exc_info)
+            line += "\n" + redact(self.formatException(record.exc_info))
         if record.stack_info:
-            line += "\n" + self.formatStack(record.stack_info)
+            line += "\n" + redact(self.formatStack(record.stack_info))
         return line
 
 

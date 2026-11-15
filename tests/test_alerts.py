@@ -107,3 +107,62 @@ def test_lower_levels_are_ignored() -> None:
     warning.levelno, warning.levelname = logging.WARNING, "WARNING"
     run_handler(bot, [warning])
     assert bot.sent == []
+
+
+def test_alert_text_is_redacted_and_bounded() -> None:
+    from sbahelper import texts
+
+    token = "123456789:AAHf9kQ2wZ_x-yLmNoPqRsTuVwXyZ012345"
+    try:
+        raise RuntimeError("x" * 10_000 + token)
+    except RuntimeError:
+        item = error_record("Failed with %s %s", token, "<" * 5000)
+        item.exc_info = sys.exc_info()
+    text = render_alert(item, logging.Formatter())
+    assert "AAHf9kQ2" not in text
+    assert texts.visible_length(text) <= texts.MESSAGE_LIMIT
+    assert "&l…" not in text  # clipped before escaping, never inside an entity
+
+
+def test_alerts_raised_while_sending_alerts_are_ignored() -> None:
+    logger = logging.getLogger("tests.alerts.recursive")
+    logger.propagate = False
+
+    class LoggingBot(FakeBot):
+        async def send_message(self, chat_id, text, parse_mode=None):
+            logger.error("Something failed while sending an alert")
+            await super().send_message(chat_id, text, parse_mode)
+
+    bot = LoggingBot()
+
+    async def scenario() -> None:
+        handler = TelegramAlerts(bot, (1,), asyncio.get_running_loop())
+        logger.addHandler(handler)
+        try:
+            logger.error("First failure")
+            await asyncio.sleep(0)
+            await asyncio.gather(*handler._tasks)
+            await asyncio.sleep(0)
+            assert not handler._tasks
+        finally:
+            logger.removeHandler(handler)
+
+    asyncio.run(scenario())
+    assert len(bot.sent) == 1
+
+
+def test_alert_bookkeeping_is_bounded(monkeypatch) -> None:
+    monkeypatch.setattr(alerts, "MAX_KEYS", 10)
+    monkeypatch.setattr(alerts, "MAX_PENDING", 3)
+
+    async def scenario() -> TelegramAlerts:
+        handler = TelegramAlerts(FakeBot(), (1,), asyncio.get_running_loop())
+        for index in range(50):
+            handler.handle(error_record(f"Distinct failure {chr(65 + index % 26)}{index // 26}x"))
+        await asyncio.sleep(0)
+        assert len(handler._tasks) <= 3
+        await asyncio.gather(*handler._tasks)
+        return handler
+
+    handler = asyncio.run(scenario())
+    assert len(handler._last_sent) <= 10 and handler.dropped > 0

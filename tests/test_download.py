@@ -1,6 +1,5 @@
 """The yt-dlp engine. yt-dlp itself is replaced by fakes: no network, no ffmpeg."""
 
-import tempfile
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock
@@ -8,7 +7,7 @@ from unittest.mock import MagicMock
 import pytest
 import yt_dlp
 
-from sbahelper import cookies, download
+from sbahelper import cookies, download, media, texts
 from sbahelper.config import settings
 from sbahelper.download import (
     Blocked,
@@ -51,8 +50,9 @@ def test_selectors_cap_the_short_side_and_the_size() -> None:
         assert "[width<=?1080]" in selector
         assert "height<=" not in selector  # vertical video: height is the long side
         assert selector.endswith("/b")
-    assert "[filesize<50M]" in format_selector("tiktok")
-    assert "[filesize_approx<45M]" in format_selector("youtube")
+    # Plain bytes: yt-dlp reads "50M" as 10^6 and "50MiB" as 2^20 bytes.
+    assert "[filesize<45000000]" in format_selector("tiktok")
+    assert "[filesize_approx<40000000]" in format_selector("youtube")
 
 
 def test_tiktok_prefers_files_that_already_have_audio() -> None:
@@ -77,6 +77,9 @@ def test_options_wire_cookies_and_progress(tmp_path: Path) -> None:
     assert opts["cookiefile"] == "/c/tiktok.txt"
     assert opts["outtmpl"] == str(tmp_path / "video.%(ext)s")
     assert seen == [25.0]
+    assert "-generic" not in opts["allowed_extractors"] and "generic" not in str(
+        opts["allowed_extractors"]
+    )
 
 
 def test_progress_callback_errors_never_break_the_download(tmp_path: Path) -> None:
@@ -103,12 +106,9 @@ def test_counts(raw, expected) -> None:
 
 def test_missing_fields_get_placeholders() -> None:
     info = video_info("youtube", {})
-    assert (info.title, info.uploader, info.duration, info.view_count) == (
-        "Без названия",
-        "Неизвестно",
-        0,
-        None,
-    )
+    # Placeholders are rendered by `texts`, not stored.
+    assert (info.title, info.uploader, info.duration, info.view_count) == ("", "", 0, None)
+    assert texts.caption(info).startswith("🎬 <b>Без названия</b>\n👤 Неизвестно")
 
 
 def test_tiktok_generated_title_is_replaced_by_the_description() -> None:
@@ -174,9 +174,17 @@ def test_ytdlp_prefixes_are_stripped() -> None:
             LoginRequired,
             True,
         ),
-        ("ERROR: getaddrinfo failed", DownloadError, False),
+        ("ERROR: getaddrinfo failed", download.NetworkFailure, False),
         ("ERROR: Unsupported URL: https://www.tiktok.com/@u/photo/1", Rejected, False),
-        ("ERROR: [youtube] x: Video unavailable", DownloadError, False),
+        ("ERROR: [youtube] x: Video unavailable", download.Unavailable, False),
+        (
+            "ERROR: [youtube] x: Private video. Sign in if you've been granted access",
+            download.PrivateVideo,
+            False,
+        ),
+        ("ERROR: No suitable extractor found for URL https://x.y", Rejected, False),
+        ("ERROR: ffmpeg is not installed", download.ToolMissing, True),
+        ("ERROR: [youtube] x: something odd", DownloadError, False),
     ],
 )
 def test_errors_are_mapped_for_chat(message: str, kind: type, alert: bool) -> None:
@@ -187,8 +195,13 @@ def test_errors_are_mapped_for_chat(message: str, kind: type, alert: bool) -> No
 
 
 def test_unknown_errors_show_the_reason() -> None:
-    error = user_error("ERROR: [youtube] x: Video unavailable", YOUTUBE)
-    assert "<code>Video unavailable</code>" in error.text
+    error = user_error("ERROR: [youtube] x: Something new <b>", YOUTUBE)
+    assert "<code>Something new &lt;b&gt;</code>" in texts.error_text(error, 45_000_000)
+
+
+def test_error_reasons_are_redacted() -> None:
+    error = user_error("ERROR: HTTP 403 https://rr1.googlevideo.com/videoplayback?sig=abc", YOUTUBE)
+    assert "abc" not in error.reason and "sig=" in error.reason
 
 
 # --------------------------------------------------------------------------- #
@@ -200,7 +213,7 @@ def fake_ydl_factory(monkeypatch, outcomes: list, targets=("chrome-146", "chrome
     """Each constructed YoutubeDL returns the next outcome from `extract_info`."""
     opened: list[tuple[str, ...]] = []
     monkeypatch.setattr(download, "impersonate_targets", lambda: tuple(targets))
-    monkeypatch.setattr(download.time, "sleep", lambda _: None)
+    monkeypatch.setattr(download.Cancel, "sleep", lambda self, seconds: None)
 
     def factory(opts, *, targets=()):
         opened.append(targets)
@@ -233,7 +246,7 @@ def test_network_retries_give_up(monkeypatch) -> None:
     fake_ydl_factory(monkeypatch, errors)
     with pytest.raises(DownloadError) as caught:
         download._extract(TIKTOK, {})
-    assert caught.value.text == download.texts.NETWORK
+    assert caught.value.code == "network"
 
 
 def test_permanent_errors_are_not_retried(monkeypatch) -> None:
@@ -277,7 +290,7 @@ def test_any_target_request_uses_our_preferences() -> None:
     ],
 )
 def test_audio_probe(monkeypatch, stdout: str, expected) -> None:
-    monkeypatch.setattr(download.subprocess, "run", lambda *a, **k: SimpleNamespace(stdout=stdout))
+    monkeypatch.setattr(media.subprocess, "run", lambda *a, **k: SimpleNamespace(stdout=stdout))
     assert download.has_audio(Path("video.mp4")) is expected
 
 
@@ -285,7 +298,7 @@ def test_missing_ffprobe_is_inconclusive(monkeypatch) -> None:
     def missing(*args, **kwargs):
         raise FileNotFoundError("ffprobe")
 
-    monkeypatch.setattr(download.subprocess, "run", missing)
+    monkeypatch.setattr(media.subprocess, "run", missing)
     assert download.has_audio(Path("video.mp4")) is None
 
 
@@ -297,9 +310,10 @@ def test_missing_ffprobe_is_inconclusive(monkeypatch) -> None:
 class FakeYDL:
     """Stands in for the YoutubeDL `_extract` returns; "downloads" a file of `payload`."""
 
-    def __init__(self, opts: dict, payload: bytes | None) -> None:
+    def __init__(self, opts: dict, payload: bytes | None, hook_updates=()) -> None:
         self.opts = opts
         self.payload = payload
+        self.hook_updates = hook_updates
 
     def __enter__(self):
         return self
@@ -308,21 +322,39 @@ class FakeYDL:
         pass
 
     def process_ie_result(self, info: dict, download: bool) -> None:
+        for update in self.hook_updates:
+            for hook in self.opts["progress_hooks"]:
+                hook(update)
         if self.payload is not None:
             Path(self.opts["outtmpl"].replace("%(ext)s", "mp4")).write_bytes(self.payload)
 
 
+def probed(**overrides) -> media.MediaInfo:
+    fields = {
+        "format_names": ("mov", "mp4"),
+        "duration": 30.0,
+        "width": 720,
+        "height": 1280,
+        "video_codec": "h264",
+        "audio_codec": "aac",
+    }
+    return media.MediaInfo(**{**fields, **overrides})
+
+
 @pytest.fixture
 def run(monkeypatch):
-    def run_download(url=YOUTUBE, *, info=None, payload=b"video", audio=True, **kwargs):
+    def run_download(
+        url=YOUTUBE, *, info=None, payload=b"video", probe=None, hook_updates=(), **kwargs
+    ):
         seen: dict = {}
 
-        def fake_extract(_url, opts):
+        def fake_extract(_url, opts, cancel=None):
             seen["opts"] = opts
-            return FakeYDL(opts, payload), info or meta()
+            return FakeYDL(opts, payload, hook_updates), info or meta()
 
         monkeypatch.setattr(download, "_extract", fake_extract)
-        monkeypatch.setattr(download, "has_audio", lambda path: audio)
+        monkeypatch.setattr(download.media, "probe", lambda path, timeout=0: probe or probed())
+        monkeypatch.setattr(download.media, "moov_after_mdat", lambda path: False)
         return download_video(url, **kwargs), seen
 
     return run_download
@@ -351,7 +383,7 @@ def test_platform_cookies_are_used(run) -> None:
 
 
 def workdirs() -> set[str]:
-    return {p.name for p in Path(tempfile.gettempdir()).glob("sbahelper-*")}
+    return {p.name for p in settings.temp_dir.glob("sbahelper-*")}
 
 
 @pytest.mark.parametrize(
@@ -359,7 +391,11 @@ def workdirs() -> set[str]:
     [
         ({"info": meta(width=1920, height=1080)}, Rejected),
         ({"payload": None}, DownloadError),
-        ({"url": TIKTOK, "audio": False}, DownloadError),
+        ({"url": TIKTOK, "probe": probed(audio_codec=None)}, DownloadError),
+        ({"probe": probed(video_codec=None)}, download.MediaError),
+        ({"probe": probed(duration=5.0)}, download.MediaError),  # 5 s of a 30 s video
+        ({"probe": probed(width=1920, height=1080)}, Rejected),  # metadata had it wrong
+        ({"hook_updates": [{"status": "downloading", "downloaded_bytes": 46_000_000}]}, Rejected),
     ],
 )
 def test_failures_leave_no_files(run, kwargs: dict, error: type) -> None:
@@ -370,15 +406,90 @@ def test_failures_leave_no_files(run, kwargs: dict, error: type) -> None:
 
 
 def test_oversized_file_is_rejected(run, monkeypatch) -> None:
-    monkeypatch.setattr(settings, "max_file_size_mb", 1)
-    with pytest.raises(Rejected, match=r"too big 2\.0MB"):
-        run(payload=b"x" * 2 * 1024 * 1024)
+    monkeypatch.setattr(settings, "max_file_size_bytes", 1_000_000)
+    with pytest.raises(Rejected, match="too big 1000001 bytes") as caught:
+        run(payload=b"x" * 1_000_001)
+    assert caught.value.code == "too_big" and caught.value.params["size"] == 1_000_001
+
+
+def test_exactly_the_limit_is_allowed(run, monkeypatch) -> None:
+    monkeypatch.setattr(settings, "max_file_size_bytes", 1_000_000)
+    result, _ = run(payload=b"x" * 1_000_000)
+    assert result.size_bytes == 1_000_000
+    result.cleanup()
+
+
+def test_estimated_size_rejects_before_downloading(run) -> None:
+    info = meta(requested_formats=[{"filesize": 40_000_000}, {"filesize_approx": 15_000_000}])
+    with pytest.raises(Rejected) as caught:
+        run(info=info, payload=None)
+    assert caught.value.code == "too_big"
+
+
+def test_unknown_estimate_is_not_a_rejection() -> None:
+    assert download.estimated_size(meta(requested_formats=[{"filesize": 1}, {}])) is None
 
 
 def test_silent_youtube_video_is_fine(run) -> None:
     # Only TikTok produces silent merges; YouTube videos may legitimately be silent.
-    result, _ = run(audio=False)
+    result, _ = run(probe=probed(audio_codec=None))
     result.cleanup()
+
+
+def test_real_dimensions_and_duration_come_from_the_file(run) -> None:
+    result, _ = run(
+        info=meta(width=None, height=None), probe=probed(width=1080, height=1920, duration=29.6)
+    )
+    assert (result.info.width, result.info.height, result.info.duration) == (1080, 1920, 30)
+    result.cleanup()
+
+
+def test_cancel_stops_the_download_and_cleans_up(run) -> None:
+    cancel = download.Cancel()
+    cancel.cancel("shutdown")
+    before = workdirs()
+    with pytest.raises(download.Cancelled):
+        run(cancel=cancel)
+    assert workdirs() == before
+
+
+def test_deadline_inside_the_transfer_aborts_it(run) -> None:
+    cancel = download.Cancel(deadline=0.0)  # already past
+    with pytest.raises(download.TimedOut):
+        run(cancel=cancel, hook_updates=[{"status": "downloading", "downloaded_bytes": 1}])
+
+
+def test_on_info_may_stop_before_downloading(run) -> None:
+    def satisfied(info):
+        raise download.Satisfied("cached")
+
+    before = workdirs()
+    with pytest.raises(download.Satisfied):
+        run(on_info=satisfied, payload=None)
+    assert workdirs() == before
+
+
+def test_resolving_to_another_site_is_rejected(run) -> None:
+    with pytest.raises(Rejected) as caught:
+        run(info=meta(webpage_url="https://example.com/x"))
+    assert caught.value.code == "unsupported"
+
+
+def test_stale_workdirs_are_cleaned_but_foreign_dirs_are_not(tmp_path: Path) -> None:
+    ours = download.make_workdir(tmp_path)
+    lookalike = tmp_path / "sbahelper-dl-foreign"
+    lookalike.mkdir()  # no marker file: not ours
+    other = tmp_path / "keep"
+    other.mkdir()
+
+    assert download.cleanup_stale_workdirs(tmp_path) == 1
+    assert not ours.exists() and lookalike.exists() and other.exists()
+
+
+def test_recent_workdirs_survive_age_based_cleanup(tmp_path: Path) -> None:
+    ours = download.make_workdir(tmp_path)
+    assert download.cleanup_stale_workdirs(tmp_path, older_than_sec=3600) == 0
+    assert ours.exists()
 
 
 # --------------------------------------------------------------------------- #
@@ -397,8 +508,8 @@ def test_accepted_cookies_are_recorded(run) -> None:
 
 
 def test_login_request_is_recorded_only_when_cookies_were_sent(monkeypatch) -> None:
-    def asks_to_log_in(url, opts):
-        raise LoginRequired("login", "Sign in to confirm you're not a bot")
+    def asks_to_log_in(url, opts, cancel=None):
+        raise LoginRequired("Sign in to confirm you're not a bot")
 
     monkeypatch.setattr(download, "_extract", asks_to_log_in)
     with pytest.raises(LoginRequired):
@@ -417,7 +528,7 @@ def test_refresh_opens_the_page_without_downloading(monkeypatch) -> None:
     ydl = MagicMock()
     seen: dict = {}
 
-    def fake_extract(url, opts):
+    def fake_extract(url, opts, cancel=None):
         seen["opts"] = opts
         return ydl, meta()
 

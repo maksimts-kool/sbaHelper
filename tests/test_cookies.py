@@ -190,9 +190,9 @@ def tiktok_values(directory: Path) -> dict[str, str]:
 def test_session_changes_are_saved_back(tmp_path: Path) -> None:
     cookies.import_text(tmp_path, NETSCAPE)
 
-    with cookies.session(tmp_path, "tiktok") as path:
-        assert path is not None and Path(path).parent == tmp_path
-        ytdlp_run(path, sessionid="rotated", new="1")
+    with cookies.session(tmp_path, "tiktok") as session:
+        assert session is not None and Path(session.path).parent == tmp_path
+        ytdlp_run(session.path, sessionid="rotated", new="1")
 
     assert tiktok_values(tmp_path) == {"sessionid": "rotated", "tt_chain_token": "xyz", "new": "1"}
     assert sorted(p.name for p in tmp_path.iterdir()) == ["tiktok.txt", "youtube.txt"]
@@ -201,8 +201,8 @@ def test_session_changes_are_saved_back(tmp_path: Path) -> None:
 def test_saved_file_keeps_the_httponly_marker_ytdlp_drops(tmp_path: Path) -> None:
     cookies.import_text(tmp_path, NETSCAPE)
 
-    with cookies.session(tmp_path, "tiktok") as path:
-        ytdlp_run(path, sessionid="rotated")
+    with cookies.session(tmp_path, "tiktok") as session:
+        ytdlp_run(session.path, sessionid="rotated")
 
     assert (
         "#HttpOnly_.tiktok.com\tTRUE\t/\tTRUE\t0\ttt_chain_token\txyz"
@@ -215,8 +215,8 @@ def test_failed_run_still_saves_rotated_cookies(tmp_path: Path) -> None:
     # session; dropping that rotation leaves a stale session in the file.
     cookies.import_text(tmp_path, NETSCAPE)
 
-    with pytest.raises(RuntimeError), cookies.session(tmp_path, "tiktok") as path:
-        ytdlp_run(path, sessionid="rotated")
+    with pytest.raises(RuntimeError), cookies.session(tmp_path, "tiktok") as session:
+        ytdlp_run(session.path, sessionid="rotated")
         raise RuntimeError
 
     assert tiktok_values(tmp_path)["sessionid"] == "rotated"
@@ -230,8 +230,8 @@ def test_parallel_runs_keep_each_others_changes(tmp_path: Path) -> None:
         cookies.session(tmp_path, "tiktok") as first,
         cookies.session(tmp_path, "tiktok") as second,
     ):
-        ytdlp_run(first, sessionid="rotated-by-first")
-        ytdlp_run(second, tt_chain_token=None, other="2")
+        ytdlp_run(first.path, sessionid="rotated-by-first")
+        ytdlp_run(second.path, tt_chain_token=None, other="2")
 
     assert tiktok_values(tmp_path) == {"sessionid": "rotated-by-first", "other": "2"}
 
@@ -239,8 +239,8 @@ def test_parallel_runs_keep_each_others_changes(tmp_path: Path) -> None:
 def test_session_does_not_overwrite_freshly_uploaded_cookies(tmp_path: Path) -> None:
     cookies.import_text(tmp_path, NETSCAPE)
 
-    with cookies.session(tmp_path, "tiktok") as path:
-        ytdlp_run(path, sessionid="old-session")
+    with cookies.session(tmp_path, "tiktok") as session:
+        ytdlp_run(session.path, sessionid="old-session")
         cookies.import_text(tmp_path, ".tiktok.com\tTRUE\t/\tTRUE\t0\tsessionid\tnew-upload\n")
 
     assert tiktok_values(tmp_path) == {"sessionid": "new-upload"}
@@ -250,8 +250,8 @@ def test_half_written_copy_is_ignored(tmp_path: Path) -> None:
     cookies.import_text(tmp_path, NETSCAPE)
     original = (tmp_path / "tiktok.txt").read_text()
 
-    with cookies.session(tmp_path, "tiktok") as path:
-        Path(path).write_text("half-written")
+    with cookies.session(tmp_path, "tiktok") as session:
+        Path(session.path).write_text("half-written")
 
     assert (tmp_path / "tiktok.txt").read_text() == original
 
@@ -273,3 +273,60 @@ def test_health_is_reported_until_new_cookies_arrive(tmp_path: Path) -> None:
     cookies.record("tiktok", True)
     cookies.import_text(tmp_path, NETSCAPE)  # a new upload: old results no longer apply
     assert [item.health for item in cookies.status(tmp_path)] == [None, None]
+
+
+def test_verdict_from_a_run_on_replaced_cookies_is_dropped(tmp_path: Path) -> None:
+    """A run that started on old cookies must not label freshly imported ones."""
+    cookies.import_text(tmp_path, NETSCAPE)
+    with cookies.session(tmp_path, "youtube") as session:
+        assert session is not None
+        # An admin uploads new cookies while the old run is still talking to the site.
+        cookies.import_text(tmp_path, NETSCAPE)
+        cookies.record("youtube", False, "Sign in", generation=session.generation)
+    assert cookies.health("youtube") is None
+
+    with cookies.session(tmp_path, "youtube") as session:
+        cookies.record("youtube", True, generation=session.generation)
+    health = cookies.health("youtube")
+    assert health is not None and health.ok
+
+
+def test_concurrent_sessions_and_imports_never_lose_the_new_upload(tmp_path: Path) -> None:
+    """Many threads rotate cookies while an import lands: the import always wins."""
+    import threading
+
+    cookies.import_text(tmp_path, NETSCAPE)
+    barrier = threading.Barrier(9)
+    errors: list[BaseException] = []
+
+    def run(index: int) -> None:
+        try:
+            with cookies.session(tmp_path, "tiktok") as session:
+                barrier.wait()
+                ytdlp_run(session.path, sessionid=f"rotated-{index}")
+        except BaseException as error:  # pragma: no cover - surfaced below
+            errors.append(error)
+
+    threads = [threading.Thread(target=run, args=(i,)) for i in range(8)]
+    for thread in threads:
+        thread.start()
+    barrier.wait()
+    cookies.import_text(tmp_path, ".tiktok.com\tTRUE\t/\tTRUE\t0\tsessionid\tfresh\n")
+    for thread in threads:
+        thread.join()
+
+    assert not errors
+    assert tiktok_values(tmp_path)["sessionid"] == "fresh"
+    assert not [p for p in tmp_path.iterdir() if p.suffix == ".tmp"]
+
+
+def test_secure_tightens_directory_and_files(tmp_path: Path) -> None:
+    directory = tmp_path / "jar"
+    cookies.import_text(directory, NETSCAPE)
+    directory.chmod(0o755)
+    (directory / "tiktok.txt").chmod(0o644)
+
+    cookies.secure(directory)
+
+    assert directory.stat().st_mode & 0o777 == 0o700
+    assert (directory / "tiktok.txt").stat().st_mode & 0o777 == 0o600

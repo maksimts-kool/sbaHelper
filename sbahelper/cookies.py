@@ -18,7 +18,11 @@ their own changes instead of overwriting each other's.
 
 `record()` keeps the last real answer from the site per platform ("accepted"
 or "asks to log in"), because an expiry date in the file says nothing about
-whether the site still accepts the session.
+whether the site still accepts the session. A verdict about cookies that were
+replaced while the run was going on is dropped.
+
+Cookies are credentials: the directory is kept at 0700 and every file at 0600
+(`secure()`), and nothing here ever logs a cookie value.
 """
 
 from __future__ import annotations
@@ -99,6 +103,16 @@ class Health:
     ok: bool
     at: datetime
     reason: str = ""
+
+
+@dataclass(frozen=True, slots=True)
+class CookieSession:
+    """A private copy of a platform's cookies for one yt-dlp run."""
+
+    path: str
+    platform: str
+    # The import generation the copy was taken from.
+    generation: int
 
 
 @dataclass(frozen=True, slots=True)
@@ -212,6 +226,29 @@ def platform_file(directory: Path, platform: str) -> Path:
     return directory / f"{platform}.txt"
 
 
+def secure(directory: Path) -> None:
+    """Create the cookie directory as 0700 and tighten what is already in it.
+
+    Only the directory itself and our own files are touched, and only when this
+    process owns them; a read-only or foreign-owned mount is left alone.
+    """
+    directory.mkdir(mode=0o700, parents=True, exist_ok=True)
+    targets = [directory, *(platform_file(directory, p) for p in PLATFORM_DOMAINS)]
+    for path in targets:
+        try:
+            info = path.stat()
+        except FileNotFoundError:
+            continue
+        wanted = 0o700 if path == directory else 0o600
+        if info.st_mode & 0o777 != wanted and info.st_uid == os.geteuid():
+            try:
+                os.chmod(path, wanted)
+            except OSError as error:
+                log.warning("Permissions not tightened. Path=%s Error=%s", path, error)
+        elif info.st_mode & 0o077:
+            log.warning("Cookie path is readable by others. Path=%s Mode=%o", path, info.st_mode)
+
+
 def import_text(directory: Path, text: str, *, source: str = "upload") -> dict[str, int]:
     """Split an export by platform and replace each platform's file.
 
@@ -227,7 +264,7 @@ def import_text(directory: Path, text: str, *, source: str = "upload") -> dict[s
     if not groups:
         raise CookieError("no TikTok or YouTube cookies in the file")
 
-    directory.mkdir(parents=True, exist_ok=True)
+    directory.mkdir(mode=0o700, parents=True, exist_ok=True)
     for platform, items in groups.items():
         with _lock:
             _write_atomic(platform_file(directory, platform), items)
@@ -272,7 +309,7 @@ def _write_atomic(path: Path, cookies: list[Cookie]) -> None:
 
 
 @contextmanager
-def session(directory: Path, platform: str) -> Iterator[str | None]:
+def session(directory: Path, platform: str) -> Iterator[CookieSession | None]:
     """A private copy of the platform's cookie file for one yt-dlp run.
 
     yt-dlp rewrites its cookie file when it closes, failed runs included. The
@@ -296,7 +333,7 @@ def session(directory: Path, platform: str) -> Iterator[str | None]:
         return
 
     try:
-        yield tmp
+        yield CookieSession(tmp, platform, generation)
     finally:
         if writable:
             _merge_back(source, platform, generation, start, Path(tmp))
@@ -358,10 +395,18 @@ def _merge_back(source: Path, platform: str, generation: int, start: _Jar, copy:
             log.warning("Refreshed cookies not saved. Platform=%s Error=%s", platform, error)
 
 
-def record(platform: str, ok: bool, reason: str = "") -> None:
-    """Remember whether the site accepted the current cookies."""
+def record(platform: str, ok: bool, reason: str = "", *, generation: int | None = None) -> None:
+    """Remember whether the site accepted the cookies of a run.
+
+    `generation` is the import generation the run's copy came from. A run that
+    started before a new import says nothing about the new cookies, so its
+    verdict is dropped instead of being shown for them.
+    """
     with _lock:
-        _health[platform] = (_generation.get(platform, 0), Health(ok, datetime.now(UTC), reason))
+        current = _generation.get(platform, 0)
+        if generation is not None and generation != current:
+            return
+        _health[platform] = (current, Health(ok, datetime.now(UTC), reason))
 
 
 def health(platform: str) -> Health | None:

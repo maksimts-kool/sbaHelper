@@ -73,3 +73,45 @@ def test_setup_replaces_handlers_and_quiets_chatty_libraries() -> None:
     finally:
         root.handlers[:], level = saved
         root.setLevel(level)
+
+
+# --------------------------------------------------------------------------- #
+#  Redaction                                                                  #
+# --------------------------------------------------------------------------- #
+
+from sbahelper.redact import redact, safe_url  # noqa: E402
+
+TOKEN = "123456789:AAHf9kQ2wZ_x-yLmNoPqRsTuVwXyZ012345"
+
+
+@pytest.mark.parametrize(
+    ("raw", "secret"),
+    [
+        (f"POST https://api.telegram.org/bot{TOKEN}/getUpdates", "AAHf9kQ2"),
+        (f"token is {TOKEN}", "AAHf9kQ2"),
+        ("Authorization: Bearer abc.def.ghi", "abc.def"),
+        ("Cookie: sessionid=s3cr3t; sid_tt=xyz", "s3cr3t"),
+        ("{'sessionid': 'zzz123'}", "zzz123"),
+        ("https://rr3.googlevideo.com/videoplayback?expire=1&sig=SIGNED&ip=1.2.3.4", "SIGNED"),
+        ("https://v16.tiktokcdn.com/a/b.mp4?x-expires=9&x-signature=SIGNED", "SIGNED"),
+        ("https://user:pw@www.youtube.com/watch?v=abcdefghijk", "pw"),
+    ],
+)
+def test_secrets_are_masked(raw: str, secret: str) -> None:
+    assert secret not in redact(raw)
+
+
+def test_video_identity_survives_redaction() -> None:
+    url = "https://www.youtube.com/watch?v=abcdefghijk&si=tracking"
+    assert safe_url(url) == "https://www.youtube.com/watch?v=abcdefghijk&si=***"
+    assert "123" in redact("https://www.tiktok.com/@u/video/123?_t=x")
+
+
+def test_formatter_redacts_messages_and_tracebacks() -> None:
+    try:
+        raise RuntimeError(f"failed for {TOKEN}")
+    except RuntimeError:
+        item = record("sbahelper.download", "Request to https://api.telegram.org/bot%s/x", TOKEN)
+        item.exc_info = sys.exc_info()
+    line = PrettyFormatter().format(item)
+    assert "AAHf9kQ2" not in line and "123456789:***" in line
