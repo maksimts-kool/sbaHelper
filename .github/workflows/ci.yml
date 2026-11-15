@@ -1,7 +1,8 @@
 name: CI
 
 # Pull requests (forks included) run with a read-only token and no secrets:
-# `pull_request`, never `pull_request_target`. Only a push to main publishes.
+# `pull_request`, never `pull_request_target`. Only pushes publish images, and only
+# main moves :latest.
 on:
   push:
   pull_request:
@@ -98,9 +99,15 @@ jobs:
           DOWNLOADER_BOT_TOKEN=dummy docker compose -f docker-compose.portainer.yml config -q
 
   publish:
-    # The production image: only from main, only after every check passed.
+    # Runs only after every check passed, never for pull requests.
+    # main → :latest and :<sha>. Other branches pushed to this repository →
+    # :<sha> and :branch-<name>, for trying a branch in Portainer without
+    # touching :latest. Dependabot branches are skipped (their token cannot
+    # write packages).
     needs: [test, audit, container]
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    if: >-
+      github.event_name == 'push' && github.ref_type == 'branch'
+      && github.actor != 'dependabot[bot]'
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -109,6 +116,23 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+      - name: Choose tags
+        id: tags
+        env:
+          BRANCH: ${{ github.ref_name }}
+        run: |
+          {
+            echo "list<<EOF"
+            echo "$IMAGE:$GITHUB_SHA"
+            if [ "$BRANCH" = "main" ]; then
+              echo "$IMAGE:latest"
+            else
+              # Docker tags: [A-Za-z0-9_.-], at most 128 characters.
+              safe=$(printf '%s' "$BRANCH" | tr -c 'A-Za-z0-9_.-' '-' | cut -c1-120)
+              echo "$IMAGE:branch-$safe"
+            fi
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
       - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
       - uses: docker/login-action@8aa5831fb8d48d8f76594c7ddde61ae58019f550 # v4.8.0
         with:
@@ -120,10 +144,7 @@ jobs:
           context: .
           push: true
           # GHCR needs a lowercase name, so it is spelled out instead of github.repository.
-          # The SHA tag is immutable: pin it (SBAHELPER_TAG) to deploy or roll back
-          # a specific build.
-          tags: |
-            ${{ env.IMAGE }}:latest
-            ${{ env.IMAGE }}:${{ github.sha }}
+          # SHA tags are immutable: pin one (SBAHELPER_TAG) to deploy or roll back a build.
+          tags: ${{ steps.tags.outputs.list }}
           cache-from: type=gha
           cache-to: type=gha,mode=max

@@ -29,8 +29,9 @@ uv lock --upgrade                        # bump dependencies, then run the tests
 
 CI (`.github/workflows/ci.yml`): `test` (ruff, pytest with real ffmpeg), `audit`
 (pip-audit on the locked runtime deps), `container` (build, non-root/read-only startup,
-health, migration, compose validation). Only a push to `main` that passes all three
-publishes `ghcr.io/maksimts-kool/sbahelper:{latest,<sha>}`. Actions are pinned to commit
+health, migration, compose validation). A push that passes all three publishes
+`ghcr.io/maksimts-kool/sbahelper:<sha>` plus `:latest` (main) or `:branch-<name>` (other
+branches; not Dependabot, not pull requests). Actions are pinned to commit
 SHAs; Dependabot (`.github/dependabot.yml`) bumps uv packages, base images and actions
 weekly. **Nothing deploys automatically** (Watchtower was removed): production runs the tag
 set in the Portainer stack (`SBAHELPER_TAG`). See docs/OPERATIONS.md.

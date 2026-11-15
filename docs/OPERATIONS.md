@@ -70,8 +70,10 @@ The `.pre-v3-*.bak` copy is there if you want the exact old database back.
 
 ## Updates and rollback
 
-Nothing updates the bot automatically. CI publishes two tags after every green push to
-`main`: `:latest` and the immutable `:<full commit SHA>`.
+Nothing updates the bot automatically. After every green push CI publishes the immutable
+`:<full commit SHA>`, plus `:latest` for `main` or `:branch-<name>` for any other branch
+(`/` becomes `-`, e.g. `branch-upgrade-production-hardening`). To try a branch, set
+`SBAHELPER_TAG` to its branch tag or SHA; `:latest` only ever moves with `main`.
 
 - **Update:** in the stack, set `SBAHELPER_TAG` (or leave `latest`) and choose *Update the
   stack* with *Re-pull image and redeploy*.
