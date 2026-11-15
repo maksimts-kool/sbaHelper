@@ -118,11 +118,19 @@ def server(tmp_path: Path) -> Iterator[str]:
         def log_message(self, *args) -> None:
             pass
 
-    httpd = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Quiet)
+    class Server(http.server.ThreadingHTTPServer):
+        # Request threads stay daemon threads (never joined); they just must not
+        # print, or a late traceback can hit stderr during interpreter shutdown.
+
+        def handle_error(self, request, client_address) -> None:
+            pass  # the client aborting a transfer is what these tests do on purpose
+
+    httpd = Server(("127.0.0.1", 0), Quiet)
     thread = threading.Thread(target=httpd.serve_forever, daemon=True)
     thread.start()
     yield f"http://127.0.0.1:{httpd.server_address[1]}/video.mp4"
     httpd.shutdown()
+    httpd.server_close()
 
 
 def transfer(url: str, workdir: Path, cancel: download.Cancel | None = None) -> None:

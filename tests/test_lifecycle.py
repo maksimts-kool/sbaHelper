@@ -56,10 +56,16 @@ def bot_api() -> Iterator[tuple[str, list[str]]]:
         def log_message(self, *args) -> None:
             pass
 
-    server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
-    threading.Thread(target=server.serve_forever, daemon=True).start()
+    class Server(http.server.ThreadingHTTPServer):
+        def handle_error(self, request, client_address) -> None:
+            pass  # the bot closing its long poll at shutdown is expected
+
+    server = Server(("127.0.0.1", 0), Handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
     yield f"http://127.0.0.1:{server.server_address[1]}/bot", calls
     server.shutdown()
+    server.server_close()
 
 
 def test_bot_starts_beats_and_stops_cleanly_on_sigterm(bot_api, tmp_path: Path) -> None:
