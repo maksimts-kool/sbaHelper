@@ -1,45 +1,129 @@
 name: CI
 
+# Pull requests (forks included) run with a read-only token and no secrets:
+# `pull_request`, never `pull_request_target`. Only a push to main publishes.
 on:
   push:
   pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  IMAGE: ghcr.io/maksimts-kool/sbahelper
 
 jobs:
   test:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
-      - uses: astral-sh/setup-uv@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
         with:
           python-version: "3.14"
+      # Real ffmpeg for the media integration tests (they skip without it).
+      - run: sudo apt-get update && sudo apt-get install -y --no-install-recommends ffmpeg
       - run: uv sync --locked
       - run: uv run ruff check
       - run: uv run ruff format --check
-      - run: uv run pytest
+      # Includes tests/test_ytdlp_compat.py: real yt-dlp, local HTTP server, no internet.
+      - run: uv run pytest -ra
+
+  audit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
+        with:
+          python-version: "3.14"
+      # Known vulnerabilities in the exact locked runtime dependencies. pip-audit
+      # runs as a pinned uvx tool; it is not a project dependency.
+      - run: uv export --locked --no-dev --no-emit-project --format requirements-txt -o requirements.txt
+      - run: >-
+          uvx --from pip-audit==2.10.1 pip-audit -r requirements.txt
+          --disable-pip --require-hashes --progress-spinner off
+
+  container:
+    # Builds on every PR and push; validates the image without any credentials.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+      - uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: .
+          load: true
+          push: false
+          tags: sbahelper:ci
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+      - name: Runs as the unprivileged user
+        run: test "$(docker run --rm sbahelper:ci id -u)" = "10001"
+      - name: Tools and yt-dlp integration points (hardened runtime)
+        run: >-
+          docker run --rm --read-only --tmpfs /tmp --cap-drop ALL
+          --security-opt no-new-privileges sbahelper:ci python -m sbahelper.health --deps
+      - name: Refuses to start without a token
+        run: |
+          set +e
+          out=$(docker run --rm --read-only --tmpfs /tmp --cap-drop ALL sbahelper:ci 2>&1)
+          code=$?
+          echo "$out"
+          test "$code" = "1" && grep -q "DOWNLOADER_BOT_TOKEN is not set" <<<"$out"
+      - name: Healthcheck fails without a heartbeat and passes with one
+        run: |
+          ! docker run --rm sbahelper:ci python -m sbahelper.health
+          docker run --rm --read-only --tmpfs /tmp sbahelper:ci \
+            sh -c 'python -c "from sbahelper import health; from pathlib import Path; health.beat(Path(\"/tmp/sbahelper.heartbeat\"))" && python -m sbahelper.health'
+      - name: Database migrates and backs up as the app user on a fresh volume
+        run: |
+          docker volume create sbahelper-ci-data
+          docker run --rm --read-only --tmpfs /tmp -v sbahelper-ci-data:/data sbahelper:ci \
+            python -c "from sbahelper.db import Database; from pathlib import Path; Database(Path('/data/downloader_stats.db'))"
+          docker run --rm --read-only --tmpfs /tmp -v sbahelper-ci-data:/data sbahelper:ci \
+            sh -c 'python -m sbahelper.backup create /data/backups/ci.db && python -m sbahelper.backup verify /data/backups/ci.db'
+      - name: Compose files are valid
+        run: |
+          docker compose -f docker-compose.yml config -q
+          DOWNLOADER_BOT_TOKEN=dummy docker compose -f docker-compose.portainer.yml config -q
 
   publish:
-    # The image Watchtower deploys: only from main and only after green tests.
-    needs: test
+    # The production image: only from main, only after every check passed.
+    needs: [test, audit, container]
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     permissions:
       contents: read
       packages: write
     steps:
-      - uses: actions/checkout@v7
-      - uses: docker/setup-buildx-action@v4
-      - uses: docker/login-action@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+      - uses: docker/login-action@8aa5831fb8d48d8f76594c7ddde61ae58019f550 # v4.8.0
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
-      - uses: docker/build-push-action@v7
+      - uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
         with:
           context: .
           push: true
           # GHCR needs a lowercase name, so it is spelled out instead of github.repository.
+          # The SHA tag is immutable: pin it (SBAHELPER_TAG) to deploy or roll back
+          # a specific build.
           tags: |
-            ghcr.io/maksimts-kool/sbahelper:latest
-            ghcr.io/maksimts-kool/sbahelper:${{ github.sha }}
+            ${{ env.IMAGE }}:latest
+            ${{ env.IMAGE }}:${{ github.sha }}
           cache-from: type=gha
           cache-to: type=gha,mode=max

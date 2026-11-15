@@ -4,217 +4,238 @@ Guidance for working on this repository.
 
 ## What this is
 
-`sbahelper` is a Telegram bot (python-telegram-bot 22, polling) for a few group chats. When a
-message contains a TikTok or YouTube link, it downloads the video with yt-dlp and replies with
-it, but only for **short vertical** videos (Shorts / TikToks up to `MAX_SHORT_DURATION_SEC`,
-up to `MAX_FILE_SIZE_MB`). Every sent video is logged to SQLite, and once a week each chat gets
-a summary (leaderboard, platforms, most-viewed video). Admins get error alerts in Telegram DMs
-and manage cookies by sending the bot a file.
+`sbahelper` is a Telegram bot (python-telegram-bot 22, long polling) for a few group chats.
+When a message contains a TikTok or YouTube link (or someone uses `/download`), it downloads
+the video with yt-dlp and replies with it, but only **short vertical** videos (up to
+`MAX_SHORT_DURATION_SEC`, up to `MAX_FILE_SIZE_BYTES`). Sent videos are cached by Telegram
+`file_id`, logged to SQLite for statistics, and each chat gets a weekly summary. Bot admins
+get error alerts in Telegram DMs and manage cookies by sending the bot a file.
 
-All user-facing text is **Russian**. Code, comments, logs and docs are **English**.
+All user-facing text is **Russian only** (no translations, no language settings). Code,
+comments, logs and docs are **English**.
 
 ## Commands
 
 ```bash
 uv sync                                  # install (Python 3.14, deps pinned in uv.lock)
-uv run pytest                            # tests: offline, no ffmpeg/deno needed, <1 s
+uv run pytest                            # offline, ~5 s; media tests use ffmpeg if present
 uv run ruff check && uv run ruff format --check
-uv run --env-file .env -m sbahelper      # run locally (needs ffmpeg + deno on PATH)
-docker compose up --build -d             # run locally in Docker (state in ./data)
+uv run --env-file .env -m sbahelper      # run locally (needs ffmpeg, ffprobe, deno on PATH)
+docker compose up --build -d             # run locally in Docker (state in ./data, UID 10001)
+uv run python -m sbahelper.health --deps # tools + yt-dlp private API check
+uv run python -m sbahelper.backup create # consistent online DB backup
 uv lock --upgrade                        # bump dependencies, then run the tests
 ```
 
-CI (`.github/workflows/ci.yml`) runs ruff check, ruff format --check and pytest; on `main` it
-then builds and pushes `ghcr.io/maksimts-kool/sbahelper:{latest,<sha>}`. Production
-(Portainer, `docker-compose.portainer.yml`) runs that image and Watchtower redeploys hourly, so
-**a green push to main ships to production**.
+CI (`.github/workflows/ci.yml`): `test` (ruff, pytest with real ffmpeg), `audit`
+(pip-audit on the locked runtime deps), `container` (build, non-root/read-only startup,
+health, migration, compose validation). Only a push to `main` that passes all three
+publishes `ghcr.io/maksimts-kool/sbahelper:{latest,<sha>}`. Actions are pinned to commit
+SHAs; Dependabot (`.github/dependabot.yml`) bumps uv packages, base images and actions
+weekly. **Nothing deploys automatically** (Watchtower was removed): production runs the tag
+set in the Portainer stack (`SBAHELPER_TAG`). See docs/OPERATIONS.md.
 
 ## Layout
 
 ```text
 sbahelper/
   __main__.py   python -m sbahelper → app.main()
-  app.py        ApplicationBuilder wiring, post_init (alerts, stats, jobs, cookies, menus), main()
-  config.py     Settings dataclass read once from env; `settings` global; Env readers collect issues
-  log.py        Pretty one-line log format + setup_logging()
-  alerts.py     logging.Handler that DMs ERROR records to ADMIN_IDS (replaces Sentry)
-  links.py      Link detection (find_link), profile/listing filter, platform_of()
-  download.py   yt-dlp engine: selectors, impersonation, validation, errors, download_video()
-  cookies.py    Cookie parsing (Netscape + JSON), import/split per platform, status, session copies
-  checks.py     Smoke checks: download CHECK_*_URL videos (startup + /check)
-  stats.py      SQLite StatsStore + weekly aggregate(); pure data, no Telegram
-  texts.py      EVERY user-facing string and renderer (captions, status, weekly summary, admin)
-  handlers.py   Telegram handlers: links, /start, /stats, /cookies, /check, cookie upload, errors
-  jobs.py       JobQueue jobs: weekly summary, cookie expiry check + refresh, startup checks
-tests/          pytest, one file per module; conftest.py resets `settings` for every test
+  app.py        ApplicationBuilder wiring, post_init/post_stop/post_shutdown, main()
+  config.py     Settings from env (single source of defaults); access policy; byte limits
+  log.py        One-line log format; every line goes through redact.redact()
+  redact.py     Masks bot tokens, cookie/auth headers, secret pairs, URL query values
+  alerts.py     logging.Handler: ERROR records → admins' DMs (grouped, bounded, redacted)
+  pacing.py     PTB rate limiter: per-chat/global buckets, RetryAfter, LOW priority
+  links.py      URL validation, entity extraction (message_links), cache identity (Link.key)
+  download.py   yt-dlp engine: selectors, impersonation, validation, error codes, Cancel
+  media.py      ffprobe inspection, MP4 faststart remux (no shell, timeouts)
+  cookies.py    Cookie parsing/import, per-run session copies, merge-back, health
+  checks.py     Smoke checks (CHECK_*_URL); last result kept in the DB state table
+  db.py         SQLite connections, versioned migrations, online backup
+  stats.py      StatsStore over db: record/aggregate periods, opt-out, delete, migrate chat
+  cache.py      FileCache: Telegram file_id per (bot id, video key), URL aliases
+  prefs.py      Chat settings (auto-download, summary topic, active) and user opt-out
+  service.py    DownloadService: admission, fair queue, dedup, workers, delivery, shutdown
+  runtime.py    Runtime dataclass in bot_data["runtime"] (service, db, stores, pacer)
+  texts.py      EVERY user-facing string and renderer; Telegram length limits
+  handlers.py   Thin Telegram handlers; all authorization checks live here
+  jobs.py       Weekly summary, daily maintenance, cookie expiry/refresh, heartbeat
+  health.py     Healthcheck CLI (heartbeat file) and --deps self-check
+  backup.py     Backup CLI (create / verify)
+tests/          pytest, one file per module; fakes.py has Telegram and downloader fakes
+docs/OPERATIONS.md  deployment, non-root migration, backup/restore, updates, troubleshooting
 ```
 
-Dependency direction: `config`/`log`/`texts` ← `links`/`cookies`/`stats` ← `download` ←
-`checks` ← `handlers` ← `jobs` ← `app`. `texts` imports model types only under
-`TYPE_CHECKING` because `download` imports `texts` for its error messages.
+Dependency direction: `config`/`log`/`redact`/`texts` ← `links`/`cookies`/`media`/`db` ←
+`download` ← `stats`/`cache`/`prefs`/`checks` ← `service` ← `runtime` ← `handlers` ← `jobs` ←
+`app`. `texts` imports model types only under `TYPE_CHECKING`.
 
 ## How a link is handled
 
-1. `handlers.on_message`: chat allowed? `links.find_link` finds the first TikTok/YouTube URL;
-   profile/channel/playlist URLs (`is_not_a_video`) are ignored silently.
-2. Reply with a status message (`texts.CHECKING`) and run `download.download_video` in a worker
-   thread (`asyncio.to_thread`). Up to 8 updates are processed concurrently.
-3. `download_video` makes a temp dir, opens a private cookie copy (`cookies.session`), then
-   **extracts once** (`_extract`) and validates the metadata (`validate`): playlist → live →
-   photo post → orientation → duration. It calls `on_info`, then downloads **from the same
-   YoutubeDL instance and info dict** (`process_ie_result`). One extraction per link means
-   fewer TikTok requests, and TikTok ties video URLs to cookies set during extraction.
-4. After the download: pick the output file, check TikTok audio (ffprobe) and the size limit.
-5. The handler edits the status (title + progress bar, at most one edit per second, never
-   after a final text), replies with the video (`reply_video`, quoting the link, width/height/
-   duration set), deletes the status, records a `DownloadEvent`, and removes the temp dir.
+1. `handlers.on_message` (passive; needs the chat allowed and its auto-download on) or
+   `handlers.cmd_download` (also as a reply). `links.message_links` reads text, caption and
+   `url`/`text_link` entities (PTB handles UTF-16 offsets), validates each URL (https, a
+   TikTok/YouTube host, no userinfo/odd port), drops profile/listing URLs, dedups by
+   identity. At most `MAX_LINKS_PER_MESSAGE` are taken.
+2. `service.admit()` checks shutdown, per-user rate, per-user/per-chat pending, queue
+   capacity and free temp space, and returns a `Ticket` (or `Refused(code)`). The handler
+   replies `texts.CHECKING` and calls `service.submit()`.
+3. `submit` checks the file cache (directly for `youtube:<id>`/`tiktok:<id>`, via an alias
+   for short links). Hit → sent by `file_id`. Else the request joins an in-flight `Job` for
+   the same key or a new job is queued (per-chat deques, round-robin).
+4. A job runs `download.download_video` in a ThreadPoolExecutor of `MAX_ACTIVE_DOWNLOADS`.
+   `download_video` makes a marked work dir, opens a private cookie copy, **extracts once**
+   (`_extract`), validates metadata (`validate`: playlist → other site → live → photo →
+   orientation → duration → size estimate), calls `on_info` (which may raise `Satisfied` on
+   a cache hit under the resolved id), downloads **from the same YoutubeDL and info dict**,
+   then `check_media` (ffprobe: video stream, TikTok audio, real orientation/duration,
+   truncation, faststart remux) and the final byte check.
+5. Delivery: first waiter uploads (`reply_video`, quoting the link; topics are kept by
+   PTB's reply shortcuts), its `file_id` is cached, other waiters get the file by id. A
+   failed upload makes the next waiter upload again. The job deletes the work dir after the
+   last waiter. Each delivery (cached or not) records a `DownloadEvent`.
+
+Cancellation is cooperative: `download.Cancel` (event + deadline) is checked between steps,
+in the progress hook (raising `_Abort`, a `DownloadCancelled`) and during retry back-off.
+A worker that overruns `DOWNLOAD_TIMEOUT_SEC + OVERRUN_GRACE_SEC` is reported to waiters
+as timed out but **keeps its slot until the thread ends**; its late result is cleaned up.
+Never wrap `asyncio.to_thread` in a timeout and assume the work stopped.
 
 ### Errors
 
-`download.DownloadError` has two fields: `text` is HTML shown in chat, and `reason` is a plain
-string for logs and `/check`. Subclasses:
+`download.DownloadError` has `code` (selects the Russian text in `texts.error_text`),
+`reason` (redacted, for logs and /check), `params` (sizes, durations) and `alert`.
+Subclasses: `Rejected` (codes photo/profile/live/horizontal/too_long/too_big/unsupported;
+flashed 5 s, INFO), `Unavailable`, `PrivateVideo`, `LoginRequired` (alert; the text must
+not claim the cookies *are* expired), `Blocked` (alert), `NetworkFailure`, `ToolMissing`
+(alert), `MediaError` (incl. `no_audio`), `TimedOut`, `Cancelled`. `user_error()` maps
+yt-dlp messages by substring tokens. No delayed retries; `_extract` only rotates
+impersonation targets and retries network errors up to 3 times.
 
-- `Rejected`: the link works but the content is not a short vertical video (photo, live,
-  profile, horizontal, too long, too big). Shown for 5 s, then deleted. Logged at INFO.
-- `LoginRequired` (`alert = True`): the site wants a login, so cookies are missing or expired.
-  Logged at ERROR with "Send fresh cookies…".
-- `Blocked` (`alert = True`): TikTok rejected every impersonation target.
-- Plain `DownloadError`: network errors (after quick retries) and anything else from yt-dlp.
-  Logged at WARNING and left in chat.
+## Telegram rules we follow
 
-`download.user_error()` maps yt-dlp messages to these by substring tokens (`_BLOCKED_ERRORS`,
-`_LOGIN_ERRORS`, `_NETWORK_ERRORS`). There is **no delayed retry** (the old 2-minute retry and
-its pickle persistence were removed on purpose). The only retries are in `_extract`:
-impersonation-target rotation and up to 3 fast retries on network errors.
+- Size: one byte limit everywhere. Selectors use **plain byte numbers** (yt-dlp reads
+  `50M` as 10^6 and `50MiB` as 2^20). Ceiling 50,000,000 (cloud Bot API); default 45 MB.
+- Text: captions ≤ 1024, messages ≤ 4096 visible UTF-16 units. Shorten plain text with
+  `texts.truncate` *before* `safe()`; `texts.fit()` guarantees the total. Never slice HTML.
+- Pacing: everything goes through `pacing.Pacer`. Pass `rate_limit_args=pacing.LOW` for
+  droppable calls (progress edits, chat actions) and handle `Throttled`. Only `RetryAfter`
+  is retried; never retry a timed-out send.
+- Callbacks: data matches `handlers._CALLBACK` (≤ 64 bytes), is re-authorized on press, and
+  every query is answered exactly once.
+- Updates: `allowed_updates` = message, callback_query, my_chat_member. Removal/ban marks a
+  chat inactive (no summaries); `Forbidden` on send does too. Group→supergroup migration
+  moves statistics and settings.
 
 ## Logging conventions
 
-Format (see `log.py`): `2026-09-23T00:07:06+03:00 [DOWNLOAD] INFO: Downloaded. Platform=tiktok Size=3.1MB`
+Format (see `log.py`): `2026-09-23T00:07:06+03:00 [DOWNLOAD] INFO: Downloaded. Platform=tiktok Size=3100000`
 
-- Tag = logger name: `sbahelper.<module>` → `<MODULE>` (aliases: app/handlers → `BOT`,
-  httpx → `HTTP`, apscheduler → `SCHEDULER`). Always use `log = logging.getLogger(__name__)`.
-- Message = short past-tense sentence + `Key=Value` pairs: `"Video sent. Chat=%s User=%s"`.
-  Use `%s` args, not f-strings. `_who(chat_id, user)` builds `Chat=… User=…`.
-- Timestamps use `TZ` (default Europe/Tallinn). Colours only on a TTY / `FORCE_COLOR`.
-- **ERROR means "an admin should look"**: every ERROR record becomes a Telegram DM via
-  `alerts.TelegramAlerts`. User-caused or transient failures must be WARNING or lower. Alerts
-  are grouped by message with numbers and URLs masked, and each group is sent at most once
-  per 10 minutes.
-- yt-dlp is quiet and its own messages go to the `yt_dlp` logger at DEBUG; we log outcomes
-  ourselves.
+- Tag = logger name (`sbahelper.<module>` → `<MODULE>`; app/handlers → `BOT`). Always
+  `log = logging.getLogger(__name__)`.
+- Message = short past-tense sentence + `Key=Value` pairs, `%s` args, no f-strings.
+  Correlate with `Req=` (request) and `Job=` ids. Do not log display names or cookie values.
+- Everything is redacted on output (`redact.redact`), but still prefer `redact.safe_url()`
+  for URLs you log on purpose.
+- **ERROR means "an admin should look"**: it becomes a Telegram DM. User-caused or
+  transient failures are WARNING or lower. Records logged while sending an alert are not
+  alerted again.
 
 ## Cookies
 
-- One Netscape file per platform: `COOKIES_DIR/tiktok.txt`, `COOKIES_DIR/youtube.txt`
-  (`PLATFORM_DOMAINS` decides which cookie goes where; YouTube also takes google.com).
-- Ways in: an admin DMs a file (`handlers.on_cookie_file` → `cookies.import_text`; the message
-  is deleted afterwards), or any other `*.txt`/`*.json` in the folder is imported on startup
-  (`import_dropped`) and renamed `*.imported`. Formats: Netscape and Cookie-Editor /
-  EditThisCookie JSON. An import **replaces** that platform's file.
-- `cookies.session()` hands yt-dlp a private copy. yt-dlp saves the jar on close, failed runs
-  included, and `_merge_back` merges only what that run added/changed/dropped into the real
-  file under `cookies._lock`. Sites rotate session cookies on almost every request (YouTube's
-  `__Secure-*PSIDTS` go stale within hours), so losing a rotation (failed or rejected link,
-  parallel runs overwriting each other) kills the session. Imports bump
-  `cookies._generation`; a run that started on older cookies merges nothing. Never point
-  yt-dlp at the real file: it rewrites its cookie file in place on close.
-- `cookies.record()` / `health()` keep the site's last verdict per platform (accepted, or
-  `LoginRequired`), set by `download._extract_recorded` when cookies were sent. In memory
-  only, reset by an import. `/cookies` shows it because the expiry dates in the file say
-  nothing about whether YouTube still accepts the session.
-- `jobs.refresh_cookies` opens each `CHECK_*_URL` (metadata only, `download.refresh`) every
-  `COOKIES_REFRESH_HOURS` so the session keeps rotating; a login request there is an ERROR.
-- `cookies.status()` reads login cookies (`LOGIN_COOKIES`) for `/cookies`, the startup log and
-  the daily `jobs.check_cookie_expiry` (ERROR → alert when <3 days left or expired).
-- YouTube cookies must come from a private window that is closed right after the export
-  (instructions in `texts.COOKIES_HINT` and README); a browser that keeps using the session
-  rotates it and YouTube revokes the bot's copy within hours.
+- One Netscape file per platform in `COOKIES_DIR` (0700; files 0600 via `cookies.secure`).
+- Ways in: admin DM (`handlers.on_cookie_file`, ≤ 1 MB by advertised *and* actual size;
+  unknown size is refused; the message is deleted and the reply says if that failed) or a
+  dropped `*.txt`/`*.json` imported at startup. An import **replaces** that platform's file.
+- `cookies.session()` yields a `CookieSession(path, platform, generation)`: a private copy;
+  `_merge_back` merges only that run's changes under `_lock`. Imports bump `_generation`;
+  a run on older cookies merges nothing **and its health verdict is dropped**
+  (`record(..., generation=)`). Never point yt-dlp at the real file.
+- `jobs.refresh_cookies` visits each `CHECK_*_URL` every `COOKIES_REFRESH_HOURS`; it helps
+  keep sessions alive but guarantees nothing.
 
 ## yt-dlp specifics (read before touching download.py)
 
-- **Impersonation:** TikTok needs curl-cffi. Its extractor asks for "any" target, yt-dlp would
-  choose the newest one, and TikTok's WAF blocks exactly that one. `_YoutubeDL` overrides the
-  private `_parse_impersonate_targets` to use `IMPERSONATE_TARGETS` (newest known-good first),
-  and `_extract` moves down the list on a block. When everything is blocked, check
-  `yt-dlp --list-impersonate-targets` and update the tuple. `impersonate_targets()` also uses
-  the private `_impersonate_target_available`, so re-test both after yt-dlp upgrades.
-- **Format selectors:** only vertical videos get through, so the resolution cap is on
-  **width** (`[width<=?1080]` means up to 1080×1920). `height<=1080` would cap Shorts at
-  480×854. TikTok prefers single H.264 files that already contain audio (merged TikTok tracks
-  can be silent; a silent TikTok is rejected after the ffprobe check). YouTube prefers the best
-  H.264 that fits `MAX_FILE_SIZE_MB - 5` via `filesize_approx`, then any codec, then 720p.
-- **YouTube** needs a JS runtime: the Docker image ships `deno`, which yt-dlp finds on PATH
-  automatically (`yt-dlp[default]` bundles the EJS solver scripts). Locally, install deno.
-- Only `download.py` imports yt_dlp. Tests replace `_extract` / `_YoutubeDL` with fakes.
+- Impersonation: `_YoutubeDL` overrides the private `_parse_impersonate_targets`;
+  `impersonate_targets()` uses `_impersonate_target_available`. `tests/test_ytdlp_compat.py`
+  and `health --deps` check both against the installed yt-dlp.
+- `allowed_extractors` = youtube*, tiktok*, vm.tiktok: the generic extractor never runs.
+- Selectors cap the **width** (`[width<=?1080]` = up to 1080×1920). TikTok prefers single
+  H.264 files with audio; YouTube the best H.264 under `limit - 5 MB`.
+- YouTube needs deno (in the image; `DENO_DIR`/`XDG_CACHE_HOME` point into /tmp because
+  the root filesystem is read-only).
+- Only `download.py` imports yt_dlp (plus the compat tests and `health`).
 
-## Texts
+## Database
 
-- Everything a chat can see lives in `texts.py`: constants for fixed strings, small functions
-  for parametrised ones, plus the caption/status/weekly/admin renderers. To change wording,
-  edit only this file.
-- Parse mode is **HTML** everywhere (set once through `Defaults` in `app.py`). Custom emoji use
-  `<tg-emoji emoji-id=…>` (`texts._emoji`).
-- Anything from users or sites goes through `texts.safe()`: HTML-escape plus `defuse()`, which
-  inserts WORD JOINERs so titles and names cannot become links, @mentions, #hashtags or
-  clickable times. `@username` in the leaderboard is left live on purpose, as a real mention.
-- Invisible names (HANGUL FILLER etc.) are detected by `has_visible_text` and shown as
-  "Участник <id>". Keep such characters as `\uXXXX` escapes in source, never literally.
+`db.Database`: WAL, `busy_timeout`, short-lived connections, explicit `transaction()`
+(`BEGIN IMMEDIATE`). Never hold a transaction across network or download work.
+Migrations live in `db.MIGRATIONS`; each runs with its `user_version` bump in one
+transaction. **To change the schema, append a migration**; never edit an applied one.
+Existing data gets a pre-migration backup automatically. v1 = legacy `downloads` (adopted
+with `IF NOT EXISTS` + `username` guard), v2 = `video_cache` + `url_aliases`,
+v3 = `chat_settings`, `user_settings`, `state`. Keep old rows readable (legacy `facebook`
+rows still render). Cache rows hold no user data. Retention (stats) and cache expiry are
+separate and pruned by the daily `maintenance` job in batches.
 
 ## Stats
 
-`stats.StatsStore` keeps one row per sent video in `downloads` (SQLite, a new connection per
-call, so it is safe from threads). `aggregate()` builds `WeeklyStats`, and
-`texts.weekly_stats()` renders it. The week runs from Monday 00:00 in `TZ` up to "now". The
-weekly job runs on `STATS_WEEKLY_WEEKDAY` (Monday = 0) at `STATS_WEEKLY_TIME`; JobQueue counts
-days from Sunday, hence `(weekday + 1) % 7`. Chats without downloads, and chats outside
-`ALLOWED_CHAT_IDS`, get nothing. Rows older than `STATS_RETENTION_DAYS` are pruned after each
-run. The schema only grows: add columns with an `ALTER TABLE` guard like `username` in
-`StatsStore.__init__`, and keep old rows readable (legacy `facebook` rows still render).
+Calendar periods in `TZ` from their start to now (`stats.period_bounds`); intervals are
+`[start, end)`. The weekly job runs on `STATS_WEEKLY_WEEKDAY` (Monday = 0) at
+`STATS_WEEKLY_TIME`; JobQueue counts days from Sunday, hence `(weekday + 1) % 7`. Inactive
+and disallowed chats get nothing. Opted-out users are stored as `user_id = 0`.
 
 ## Configuration
 
-`config.Settings.from_env()` is the single source of defaults. The compose files only pass
-variables through, with empty values meaning "default". Invalid values fall back to the
-default and are logged as warnings at startup (`settings.issues`); they never crash the bot.
-To add a setting: add a field to `Settings`, read it in `from_env` with the right `Env` reader,
-then add it to `.env.example`, to `docker-compose.portainer.yml` if it should be settable in
-Portainer, and to `tests/conftest.py` if tests depend on it.
+`config.Settings.from_env()` is the single source of defaults; compose files only pass
+variables through. Invalid values fall back with a warning (`settings.issues`), except the
+allowlist, which fails closed. To add a setting: field in `Settings`, read in `from_env`,
+add to `.env.example`, `docker-compose.portainer.yml` (if settable in Portainer) and
+`tests/conftest.py`.
 
 | Variable | Default | Notes |
 | --- | --- | --- |
 | `DOWNLOADER_BOT_TOKEN` | (none) | required |
-| `ALLOWED_CHAT_IDS` | empty = all | comma-separated |
-| `ADMIN_IDS` | empty | alerts, cookie upload, /cookies, /check |
-| `TZ` | Europe/Tallinn | logs + weekly summary |
-| `LOG_LEVEL` | INFO | |
-| `MAX_FILE_SIZE_MB` | 50 | Telegram bot upload limit |
+| `ACCESS_POLICY` | open if no allowlist, else allowlist | open / allowlist; invalid → allowlist |
+| `ALLOWED_CHAT_IDS` | empty | invalid entries dropped, never widens access |
+| `ADMIN_IDS` | empty | alerts, cookies, /status, /cookies, /check (private chat) |
+| `TZ` / `LOG_LEVEL` | Europe/Tallinn / INFO | |
+| `MAX_FILE_SIZE_BYTES` | 45000000 | 1e6…5e7; `MAX_FILE_SIZE_MB` deprecated (×10^6) |
 | `MAX_SHORT_DURATION_SEC` | 300 | |
+| `MAX_LINKS_PER_MESSAGE` | 3 | |
+| `MAX_ACTIVE_DOWNLOADS` / `MAX_QUEUED_DOWNLOADS` | 3 / 20 | |
+| `MAX_PENDING_PER_USER` / `MAX_PENDING_PER_CHAT` | 3 / 8 | |
+| `USER_LINKS_PER_MINUTE` | 10 | |
+| `DOWNLOAD_TIMEOUT_SEC` | 240 | |
+| `TEMP_DIR` | system temp (/tmp) | work dirs `sbahelper-dl-*` with a marker file |
+| `CACHE_TTL_DAYS` | 30 | 0 = no cache |
+| `DROP_PENDING_UPDATES` | 1 | |
 | `COOKIES_DIR` | /data/cookies | |
-| `CHECK_TIKTOK_URL`, `CHECK_YOUTUBE_URL` | empty | smoke-check videos |
-| `COOKIES_REFRESH_HOURS` | 4 | visit CHECK URLs with cookies; 0 = off |
+| `CHECK_TIKTOK_URL`, `CHECK_YOUTUBE_URL` | empty | |
+| `COOKIES_REFRESH_HOURS` | 4 | 0 = off |
 | `STATS_ENABLED` | 1 | |
-| `STATS_DB_PATH` | /data/downloader_stats.db | |
+| `STATS_DB_PATH` | /data/downloader_stats.db | the whole database, not only stats |
 | `STATS_WEEKLY_WEEKDAY` / `STATS_WEEKLY_TIME` | 6 / 20:00 | |
-| `STATS_RETENTION_DAYS` | 400 | 0 = keep forever |
+| `STATS_RETENTION_DAYS` | 400 | 0 = forever |
+| `HEARTBEAT_PATH` | /tmp/sbahelper.heartbeat | |
 
 ## Deployment notes
 
-- Image: `python:3.14-slim` + Debian `ffmpeg` + `deno` binary + a venv built by uv in a
-  separate stage (uv is not in the final image). `/data` is the only state (stats DB and, in
-  local compose, cookies). In Portainer, cookies are a host bind mount at `/data/cookies`
-  (`COOKIES_HOST_DIR`, default `/opt/sbahelper/cookies`); create it before deploying.
-- Keep the service and container name `downloader-bot`: renaming it in Portainer leaves the
-  old container running next to the new one.
-- GHCR packages are private by default. Either make `sbahelper` public or add a ghcr.io
-  registry with a `read:packages` PAT in Portainer.
+- Image: `python:3.14-slim` + Debian `ffmpeg` + `ca-certificates` + `deno` + a uv-built venv.
+  Runs as **UID/GID 10001**, read-only root, `/tmp` tmpfs, caps dropped, healthcheck on the
+  heartbeat. `/data` holds the database (and cookies locally). In Portainer, cookies are a
+  host bind mount (`COOKIES_HOST_DIR`, default `/opt/sbahelper/cookies`) owned by 10001.
+- Volumes from the old root image must be chowned once: docs/OPERATIONS.md.
+- Keep the service and container name `downloader-bot`, and one instance per token.
+- GHCR packages are private by default: make `sbahelper` public or add a `read:packages` PAT.
 
 ## Testing conventions
 
-- pytest functions, no network. `conftest.py` resets `settings` fields (monkeypatch) and gives
-  each test its own `cookies_dir`/`stats_db_path` under `tmp_path`. Patch `settings` fields
-  with `monkeypatch.setattr(settings, ...)`, not env vars.
-- Telegram objects are small fakes (`tests/test_handlers.py::FakeMessage`); only `test_jobs.py`
-  builds a real `Application` (for JobQueue scheduling).
+- pytest functions, no network. `conftest.py` resets `settings` (monkeypatch) and gives each
+  test its own cookie dir, temp dir, DB path and heartbeat path. Patch `settings` fields,
+  not env vars (except config tests).
+- Fakes in `tests/fakes.py` (`FakeMessage`, `FakeRunner`, `drain`). Real PTB objects only
+  where library behaviour is the point (entities, topic replies, JobQueue scheduling).
 - Async code runs through `asyncio.run(...)` inside plain test functions.
-- Do not monkeypatch `time.monotonic` or `asyncio.sleep` globally without keeping a reference to
-  the original: the event loop uses them too.
+- Never monkeypatch `asyncio.sleep` or `time.monotonic` globally: inject a clock/sleep
+  (`Pacer(clock=, sleep=)`, `DownloadService(clock=)`).

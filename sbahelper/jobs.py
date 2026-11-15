@@ -193,7 +193,9 @@ def schedule(app: Application) -> None:
     rt = app.bot_data.get("runtime")
     has_stats = isinstance(rt, Runtime) and rt.stats is not None
 
-    jobs.run_repeating(heartbeat, HEARTBEAT_EVERY_SEC, first=0, name="heartbeat")
+    # A run scheduled for "now" before the scheduler starts would count as
+    # missed; app._post_init writes the first beat itself.
+    jobs.run_repeating(heartbeat, HEARTBEAT_EVERY_SEC, first=5, name="heartbeat")
     jobs.run_daily(maintenance, MAINTENANCE_AT.replace(tzinfo=settings.tz), name="maintenance")
     if has_stats:
         # JobQueue counts days from Sunday, `datetime.weekday()` from Monday.

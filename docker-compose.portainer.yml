@@ -2,23 +2,40 @@
 # stack environment variables (see README.md). Only DOWNLOADER_BOT_TOKEN is
 # required; an unset variable falls back to the default in sbahelper/config.py.
 #
-# Watchtower pulls a new :latest (published by CI after green tests on main)
-# every hour and restarts the bot. It runs without a compose profile because
-# Portainer's UI cannot select profiles.
+# BEFORE the first deploy of a non-root image (v3+), give the volumes to UID 10001:
+# README.md → "Non-root volume migration". Without it the bot cannot write its
+# database or cookies.
+#
+# Updates are manual: nothing pulls images by itself. CI publishes :latest and an
+# immutable :<commit SHA> after every green push to main. To update, set
+# SBAHELPER_TAG (default latest) and use "Update the stack" with "Re-pull image";
+# to roll back, set SBAHELPER_TAG to an older SHA and update again (README →
+# "Updates and rollback"). Never run two stacks with the same bot token.
 
 services:
   downloader-bot:
-    image: ghcr.io/maksimts-kool/sbahelper:latest
+    image: "ghcr.io/maksimts-kool/sbahelper:${SBAHELPER_TAG:-latest}"
     container_name: downloader-bot
     restart: unless-stopped
     environment:
       DOWNLOADER_BOT_TOKEN: "${DOWNLOADER_BOT_TOKEN:?set DOWNLOADER_BOT_TOKEN in the stack environment}"
+      ACCESS_POLICY: "${ACCESS_POLICY:-}"
       ALLOWED_CHAT_IDS: "${ALLOWED_CHAT_IDS:-}"
       ADMIN_IDS: "${ADMIN_IDS:-}"
       TZ: "${TZ:-Europe/Tallinn}"
       LOG_LEVEL: "${LOG_LEVEL:-}"
+      MAX_FILE_SIZE_BYTES: "${MAX_FILE_SIZE_BYTES:-}"
       MAX_FILE_SIZE_MB: "${MAX_FILE_SIZE_MB:-}"
       MAX_SHORT_DURATION_SEC: "${MAX_SHORT_DURATION_SEC:-}"
+      MAX_LINKS_PER_MESSAGE: "${MAX_LINKS_PER_MESSAGE:-}"
+      MAX_ACTIVE_DOWNLOADS: "${MAX_ACTIVE_DOWNLOADS:-}"
+      MAX_QUEUED_DOWNLOADS: "${MAX_QUEUED_DOWNLOADS:-}"
+      MAX_PENDING_PER_USER: "${MAX_PENDING_PER_USER:-}"
+      MAX_PENDING_PER_CHAT: "${MAX_PENDING_PER_CHAT:-}"
+      USER_LINKS_PER_MINUTE: "${USER_LINKS_PER_MINUTE:-}"
+      DOWNLOAD_TIMEOUT_SEC: "${DOWNLOAD_TIMEOUT_SEC:-}"
+      CACHE_TTL_DAYS: "${CACHE_TTL_DAYS:-}"
+      DROP_PENDING_UPDATES: "${DROP_PENDING_UPDATES:-}"
       CHECK_TIKTOK_URL: "${CHECK_TIKTOK_URL:-}"
       CHECK_YOUTUBE_URL: "${CHECK_YOUTUBE_URL:-}"
       COOKIES_REFRESH_HOURS: "${COOKIES_REFRESH_HOURS:-}"
@@ -28,20 +45,20 @@ services:
       STATS_RETENTION_DAYS: "${STATS_RETENTION_DAYS:-}"
     volumes:
       - stats-data:/data
-      # Cookie files. The bot also writes here when an admin sends it cookies,
-      # and imports any other *.txt / *.json dropped in on startup.
+      # Cookie files (credentials: keep the host folder 0700, owned by 10001).
+      # The bot writes here when an admin sends it cookies and imports any other
+      # *.txt / *.json dropped in on startup.
       - "${COOKIES_HOST_DIR:-/opt/sbahelper/cookies}:/data/cookies"
-    labels: ["com.centurylinklabs.watchtower.enable=true"]
-    logging:
-      driver: json-file
-      options: { max-size: "10m", max-file: "3" }
-
-  watchtower:
-    image: nickfedor/watchtower
-    container_name: downloader-watchtower
-    restart: unless-stopped
-    volumes: ["/var/run/docker.sock:/var/run/docker.sock"]
-    command: --cleanup --label-enable --interval 3600
+    read_only: true
+    tmpfs:
+      - /tmp:size=${SBAHELPER_TMP_SIZE:-768m},mode=1777
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    mem_limit: "${SBAHELPER_MEM_LIMIT:-1536m}"
+    cpus: "${SBAHELPER_CPUS:-2}"
+    pids_limit: 256
+    stop_signal: SIGTERM
+    stop_grace_period: 40s
     logging:
       driver: json-file
       options: { max-size: "10m", max-file: "3" }

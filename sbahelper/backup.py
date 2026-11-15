@@ -15,6 +15,7 @@ restore". Cookie files are credentials and are not part of this backup.
 from __future__ import annotations
 
 import argparse
+import os
 import sqlite3
 import sys
 from datetime import UTC, datetime
@@ -37,6 +38,7 @@ def main(argv: list[str] | None = None) -> int:
     verify = sub.add_parser("verify", help="check a database or backup file")
     verify.add_argument("file", type=Path)
     args = parser.parse_args(argv)
+    os.umask(0o077)  # copies hold chat and user ids
 
     try:
         if args.action == "create":

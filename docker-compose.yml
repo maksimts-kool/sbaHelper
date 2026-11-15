@@ -1,13 +1,33 @@
 # Local development: builds from source and keeps state in ./data
-# (stats database and ./data/cookies). Copy .env.example to .env first.
+# (database and ./data/cookies). Copy .env.example to .env first.
 # Production runs docker-compose.portainer.yml instead.
+#
+# The container runs as UID/GID 10001. On Linux, either give ./data to that user
+#   mkdir -p data/cookies && sudo chown -R 10001:10001 data && chmod -R go-rwx data
+# or run as yourself: SBAHELPER_USER="$(id -u):$(id -g)" docker compose up -d
 services:
   downloader-bot:
     build: .
     container_name: downloader-bot
     restart: unless-stopped
+    user: "${SBAHELPER_USER:-10001:10001}"
     env_file:
       - path: .env
         required: false
     volumes:
       - ./data:/data
+    read_only: true
+    tmpfs:
+      # Work files (up to ~3x MAX_FILE_SIZE_BYTES per running download) and caches.
+      - /tmp:size=${SBAHELPER_TMP_SIZE:-768m},mode=1777
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    # tmpfs pages count towards the memory limit.
+    mem_limit: "${SBAHELPER_MEM_LIMIT:-1536m}"
+    cpus: "${SBAHELPER_CPUS:-2}"
+    pids_limit: 256
+    stop_signal: SIGTERM
+    stop_grace_period: 40s
+    logging:
+      driver: json-file
+      options: { max-size: "10m", max-file: "3" }

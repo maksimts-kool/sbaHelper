@@ -20,7 +20,7 @@ from telegram.constants import ParseMode
 from telegram.error import TelegramError
 from telegram.ext import Application, ApplicationBuilder, Defaults
 
-from sbahelper import cookies, handlers, jobs, media, texts
+from sbahelper import cookies, handlers, health, jobs, media, texts
 from sbahelper.alerts import TelegramAlerts
 from sbahelper.cache import FileCache, policy_fingerprint
 from sbahelper.config import settings
@@ -76,6 +76,22 @@ def _prepare_cookies() -> None:
         )
 
 
+def _check_storage() -> None:
+    """Say clearly when a volume is not writable (e.g. still owned by root)."""
+    for label, path in (
+        ("Database folder", settings.stats_db_path.parent),
+        ("Cookie folder", settings.cookies_dir),
+        ("Temporary folder", settings.temp_dir),
+    ):
+        if path.exists() and not os.access(path, os.W_OK | os.X_OK):
+            log.error(
+                "%s is not writable by UID %d. Path=%s. See README 'Non-root volume migration'.",
+                label,
+                os.geteuid(),
+                path,
+            )
+
+
 def _check_tools() -> None:
     if missing := media.missing_tools():
         log.error("Video tools missing: every download will fail. Missing=%s", ",".join(missing))
@@ -129,6 +145,7 @@ async def _post_init(app: Application) -> None:
     # Everything below may log errors, so it runs after the alerts are installed.
     await asyncio.to_thread(log_impersonation_status)
     await asyncio.to_thread(_check_tools)
+    await asyncio.to_thread(_check_storage)
     # No worker runs yet, so every leftover work directory is abandoned.
     if removed := await asyncio.to_thread(cleanup_stale_workdirs, settings.temp_dir, 0):
         log.info("Leftover work directories removed. Count=%d", removed)
@@ -153,6 +170,10 @@ async def _post_init(app: Application) -> None:
     )
     if settings.access_policy == "open":
         log.warning("ACCESS_POLICY is open: the bot answers in every chat.")
+    try:
+        await asyncio.to_thread(health.beat, settings.heartbeat_path)
+    except OSError as error:
+        log.error("Heartbeat not written. Path=%s Error=%s", settings.heartbeat_path, error)
 
 
 async def _post_stop(app: Application) -> None:
@@ -171,11 +192,13 @@ async def _post_shutdown(app: Application) -> None:
     log.info("Bot stopped.")
 
 
-def build_application() -> Application:
+def build_application(base_url: str | None = None) -> Application:
+    """`base_url` points at another Bot API server (used by the lifecycle test)."""
+    builder = ApplicationBuilder().token(settings.token)
+    if base_url:
+        builder = builder.base_url(base_url)
     app = (
-        ApplicationBuilder()
-        .token(settings.token)
-        .defaults(
+        builder.defaults(
             Defaults(
                 parse_mode=ParseMode.HTML,
                 link_preview_options=LinkPreviewOptions(is_disabled=True),
@@ -198,7 +221,7 @@ def build_application() -> Application:
     return app
 
 
-def main() -> int:
+def main(base_url: str | None = None) -> int:
     # Everything the bot writes (database, cookies, work files) is private to it.
     os.umask(0o077)
     setup_logging(settings.log_level, settings.tz)
@@ -210,7 +233,7 @@ def main() -> int:
 
     # Telegram keeps undelivered updates for up to 24 h. By default they are
     # dropped on start so a restart does not replay a burst of old links.
-    build_application().run_polling(
+    build_application(base_url).run_polling(
         timeout=30,
         bootstrap_retries=-1,
         drop_pending_updates=settings.drop_pending_updates,
