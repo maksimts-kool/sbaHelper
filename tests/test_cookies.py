@@ -1,5 +1,6 @@
 import http.cookiejar
 import json
+import os
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -330,3 +331,19 @@ def test_secure_tightens_directory_and_files(tmp_path: Path) -> None:
 
     assert directory.stat().st_mode & 0o777 == 0o700
     assert (directory / "tiktok.txt").stat().st_mode & 0o777 == 0o600
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root reads any file")
+def test_unreadable_cookie_file_means_no_cookies_not_a_crash(tmp_path: Path, caplog) -> None:
+    cookies.import_text(tmp_path, NETSCAPE)
+    (tmp_path / "tiktok.txt").chmod(0)
+    try:
+        with cookies.session(tmp_path, "tiktok") as session:
+            assert session is None
+    finally:
+        (tmp_path / "tiktok.txt").chmod(0o600)
+    assert any(
+        r.levelname == "ERROR" and "continuing without cookies" in r.getMessage()
+        for r in caplog.records
+    )
+    assert not [p for p in tmp_path.iterdir() if p.suffix == ".tmp"]

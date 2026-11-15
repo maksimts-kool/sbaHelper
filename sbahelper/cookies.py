@@ -322,12 +322,25 @@ def session(directory: Path, platform: str) -> Iterator[CookieSession | None]:
         if not source.is_file():
             tmp = None
         else:
-            tmp, writable = _copy(source, directory, platform)
-            generation = _generation.get(platform, 0)
             try:
-                start = _read(Path(tmp))
-            except OSError, CookieError, UnicodeDecodeError:
-                start = {}  # unreadable: yt-dlp will say so; nothing to merge into
+                tmp, writable = _copy(source, directory, platform)
+            except OSError as error:
+                # Typically a cookie folder still owned by root after the switch to a
+                # non-root container. Downloading without cookies beats failing outright.
+                log.error(
+                    "Cookie file unreadable; continuing without cookies. Platform=%s Path=%s "
+                    "Error=%s. See docs/OPERATIONS.md 'Non-root volume migration'.",
+                    platform,
+                    source,
+                    error,
+                )
+                tmp = None
+            else:
+                generation = _generation.get(platform, 0)
+                try:
+                    start = _read(Path(tmp))
+                except OSError, CookieError, UnicodeDecodeError:
+                    start = {}  # unreadable: yt-dlp will say so; nothing to merge into
     if tmp is None:
         yield None
         return
